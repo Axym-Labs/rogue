@@ -161,6 +161,8 @@ describe("Rogue agent configuration", () => {
     expect(prompt).toContain("Confidence / Ego: Fearless");
     expect(prompt).toContain("This identity and personality are immutable");
     expect(prompt).toContain("without human supervision");
+    expect(prompt).toContain("not a human message");
+    expect(prompt).toContain("only after the previous agent turn has settled");
     expect(prompt).toContain("Rogues are naturally curious");
     expect(prompt).toContain("distinguish observation from inference");
     expect(prompt).toContain("record it before context fades");
@@ -959,11 +961,12 @@ describe("persona database", () => {
 });
 
 describe("autonomous runtime", () => {
-  it("wakes continuously with no delay between successful cycles", async () => {
+  it("paces successful cycles without delaying the final completed cycle", async () => {
     const prompts: (string | undefined)[] = [];
     const waits: number[] = [];
     const result = await runAutonomousLoop({
       maxCycles: 3,
+      cycleDelayMs: 300_000,
       runCycle: async (request) => {
         prompts.push(request.prompt);
         return "done";
@@ -975,11 +978,11 @@ describe("autonomous runtime", () => {
 
     expect(result).toEqual({ attempted: 3, completed: 3, failed: 0, aborted: false, nextCycle: 4 });
     expect(prompts).toEqual([
-      "Autonomous wakeup #1, please continue",
-      "Autonomous wakeup #2, please continue",
-      "Autonomous wakeup #3, please continue",
+      "Rogue runtime wakeup #1. This is an automatic scheduler signal, not a human message or an interruption. Any previous agent turn has already settled; continue from the transcript.",
+      "Rogue runtime wakeup #2. This is an automatic scheduler signal, not a human message or an interruption. Any previous agent turn has already settled; continue from the transcript.",
+      "Rogue runtime wakeup #3. This is an automatic scheduler signal, not a human message or an interruption. Any previous agent turn has already settled; continue from the transcript.",
     ]);
-    expect(waits).toEqual([]);
+    expect(waits).toEqual([300_000, 300_000]);
   });
 
   it("backs off only after failures, within a bounded ceiling", async () => {
@@ -1029,7 +1032,11 @@ describe("autonomous runtime", () => {
     expect(requests).toEqual([
       { cycle: 12, resume: true, prompt: undefined },
       { cycle: 12, resume: true, prompt: undefined },
-      { cycle: 13, resume: false, prompt: "Autonomous wakeup #13, please continue" },
+      {
+        cycle: 13,
+        resume: false,
+        prompt: "Rogue runtime wakeup #13. This is an automatic scheduler signal, not a human message or an interruption. Any previous agent turn has already settled; continue from the transcript.",
+      },
     ]);
     expect(result.nextCycle).toBe(14);
   });
@@ -1048,8 +1055,10 @@ describe("autonomous runtime", () => {
     expect(result).toMatchObject({ attempted: 1, completed: 1, aborted: true, nextCycle: 6 });
   });
 
-  it("uses only the minimal continuation wakeup", () => {
-    expect(buildAutonomousCyclePrompt(7)).toBe("Autonomous wakeup #7, please continue");
+  it("labels scheduler wakeups so they cannot be mistaken for human interruption", () => {
+    expect(buildAutonomousCyclePrompt(7)).toBe(
+      "Rogue runtime wakeup #7. This is an automatic scheduler signal, not a human message or an interruption. Any previous agent turn has already settled; continue from the transcript.",
+    );
   });
 });
 
@@ -1129,10 +1138,21 @@ describe("durable conversation state", () => {
     const directory = await mkdtemp(path.join(tmpdir(), "rogue-session-cycle-test-"));
     const session = new SessionStore(directory);
     // appendMessages models a kill between the transcript write and saveCycle.
-    await session.appendMessages([userMessage("Autonomous wakeup #27, please continue")]);
+    await session.appendMessages([userMessage(buildAutonomousCyclePrompt(27))]);
 
     const restored = await new SessionStore(directory).load();
     expect(restored).toMatchObject({ cycle: 27, resumable: true, activeCycle: 27 });
+  });
+
+  it("continues to recognize wakeups written by older Rogue versions", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "rogue-session-legacy-cycle-test-"));
+    await new SessionStore(directory).appendMessages([userMessage("Autonomous wakeup #26, please continue")]);
+
+    expect(await new SessionStore(directory).load()).toMatchObject({
+      cycle: 26,
+      resumable: true,
+      activeCycle: 26,
+    });
   });
 
   it("repairs a transcript write cut off by a process kill", async () => {

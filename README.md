@@ -15,6 +15,10 @@ node rogue.js
 Run `local-rogue` from anywhere. The Axym Labs wrapper starts the existing Qwen
 27B NInfer service only for that session, pins Rogue to it with `xhigh` reasoning
 and no provider failover, and stops both containers when the wrapper closes.
+Future autonomous cycles wait five minutes after each successful cycle, which
+reduces scheduler wakeups and leaves explicit room between bursts. Override the
+pause with `LOCAL_ROGUE_CYCLE_DELAY_SECONDS` (use `0` for the old immediate
+cadence).
 
 Docker exposes the complete `/home/davwis/main/workspace` tree read-only. Only
 `/home/davwis/main/workspace/rogue-workdir` is writable, and that is Rogue's

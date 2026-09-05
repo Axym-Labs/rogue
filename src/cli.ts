@@ -43,6 +43,7 @@ interface CliOptions {
   prompt?: string;
   interactive: boolean;
   maxCycles?: number;
+  cycleDelaySeconds?: number;
   sessionRetentionDays?: number;
   autoSelectPersona: boolean;
   authenticate: boolean;
@@ -81,6 +82,7 @@ Options:
   --thinking <level> off|minimal|low|medium|high|xhigh|max
   --interactive      Start the supervised chat interface
   --max-cycles <n>   Stop after n attempted cycles (default: run forever)
+  --cycle-delay <s>  Wait s seconds after each successful autonomous cycle
   --session-retention-days <n> Delete raw transcript turns older than n days on restart
   --fresh-session    Discard the persisted conversation and start a new one
   --auto-select      Select the first generated persona without prompting
@@ -154,6 +156,10 @@ export function parseArgs(args: string[]): CliOptions {
       const value = Number(takeValue(args, index++, arg));
       if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Invalid max cycles: ${value}`);
       options.maxCycles = value;
+    } else if (arg === "--cycle-delay") {
+      const value = Number(takeValue(args, index++, arg));
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Invalid cycle delay: ${value}`);
+      options.cycleDelaySeconds = value;
     } else if (arg === "--thinking") {
       const value = takeValue(args, index++, arg);
       if (!THINKING_LEVELS.has(value)) throw new Error(`Invalid thinking level: ${value}`);
@@ -551,7 +557,7 @@ async function main(): Promise<void> {
       ["Fallbacks", fallbackRoutes.length
         ? fallbackRoutes.join(ui.style.faint(" → "))
         : ui.style.faint(options.allowFailover ? "none configured" : "disabled (--no-failover)")],
-      ["Cadence", `continuous · no delay between wakeups${options.maxCycles ? ` · max ${options.maxCycles} cycles` : ""}`],
+      ["Cadence", `${options.cycleDelaySeconds ?? 0}s after successful cycles${options.maxCycles ? ` · max ${options.maxCycles} cycles` : ""}`],
       ["Prompt cache", `${options.cacheRetention ?? DEFAULT_CACHE_RETENTION} retention${options.cacheRetention === "none" ? ui.style.faint(" (disabled)") : ""}`],
       ["Session", restored.messages.length
         ? `${restored.messages.length} restored messages · ${restored.resumable ? `resuming cycle ${startCycle}` : `next cycle ${startCycle}`}${restored.interruptedToolCalls ? ` · ${restored.interruptedToolCalls} interrupted tool call${restored.interruptedToolCalls === 1 ? "" : "s"} closed` : ""}`
@@ -588,6 +594,7 @@ async function main(): Promise<void> {
       startCycle,
       shouldResume: hasUnansweredTurn,
       maxCycles: options.maxCycles,
+      cycleDelayMs: (options.cycleDelaySeconds ?? 0) * 1_000,
       signal: controller.signal,
       async onCycleStart(request: AutonomousCycleRequest) {
         cycleUsage = emptyCacheUsage();

@@ -29,6 +29,8 @@ export interface AutonomousLoopOptions {
    */
   shouldResume?: () => boolean | Promise<boolean>;
   maxCycles?: number;
+  /** Pause after each successful cycle before starting the next one. */
+  cycleDelayMs?: number;
   failureBackoffMs?: number;
   maxFailureBackoffMs?: number;
   signal?: AbortSignal;
@@ -48,7 +50,15 @@ export interface AutonomousLoopResult {
 }
 
 export function buildAutonomousCyclePrompt(cycle: number): string {
-  return `Autonomous wakeup #${cycle}, please continue`;
+  return `Rogue runtime wakeup #${cycle}. This is an automatic scheduler signal, not a human message or an interruption. Any previous agent turn has already settled; continue from the transcript.`;
+}
+
+/** Decode both current wakeups and transcripts produced by older releases. */
+export function autonomousCycleFromPrompt(prompt: string): number | undefined {
+  const current = /^Rogue runtime wakeup #(\d+)\. This is an automatic scheduler signal, not a human message or an interruption\. Any previous agent turn has already settled; continue from the transcript\.$/.exec(prompt);
+  const legacy = /^Autonomous wakeup #(\d+), please continue$/.exec(prompt);
+  const cycle = Number((current ?? legacy)?.[1]);
+  return Number.isSafeInteger(cycle) && cycle > 0 ? cycle : undefined;
 }
 
 export async function abortableWait(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -67,17 +77,18 @@ export async function abortableWait(milliseconds: number, signal?: AbortSignal):
 /**
  * Run wake cycles back to back for as long as the process lives.
  *
- * There is no cadence to configure: a cycle ends and the next one begins. Only
- * consecutive failures pause the loop, and only so an agent whose provider is
- * unreachable waits instead of spinning; the delay is capped so it resumes
- * promptly once it can run again. A cycle the agent never answered — because
- * the provider failed, or because the previous process was killed — is retried
- * as a continuation rather than buried under another wakeup.
+ * Successful cycles may be paced with `cycleDelayMs`. Consecutive failures use
+ * a separate bounded backoff so an unavailable provider does not spin. A cycle
+ * the agent never answered — because the provider failed, or because the
+ * previous process was killed — is retried as a continuation rather than
+ * buried under another wakeup.
  */
 export async function runAutonomousLoop(options: AutonomousLoopOptions): Promise<AutonomousLoopResult> {
   const wait = options.wait ?? abortableWait;
   const backoff = options.failureBackoffMs ?? FAILURE_BACKOFF_MS;
   const maxBackoff = options.maxFailureBackoffMs ?? MAX_FAILURE_BACKOFF_MS;
+  const cycleDelay = options.cycleDelayMs ?? 0;
+  if (!Number.isFinite(cycleDelay) || cycleDelay < 0) throw new Error("Invalid autonomous cycle delay.");
   let cycle = options.startCycle ?? 1;
   let attempted = 0;
   let completed = 0;
@@ -117,7 +128,8 @@ export async function runAutonomousLoop(options: AutonomousLoopOptions): Promise
     if (result.ok) cycle += 1;
 
     if (options.signal?.aborted || (options.maxCycles !== undefined && attempted >= options.maxCycles)) break;
-    if (!result.ok) await wait(Math.min(backoff * 2 ** (consecutiveFailures - 1), maxBackoff), options.signal);
+    if (result.ok && cycleDelay > 0) await wait(cycleDelay, options.signal);
+    else if (!result.ok) await wait(Math.min(backoff * 2 ** (consecutiveFailures - 1), maxBackoff), options.signal);
   }
 
   return { attempted, completed, failed, aborted: options.signal?.aborted ?? false, nextCycle: cycle };

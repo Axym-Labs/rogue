@@ -20,6 +20,7 @@ WRITABLE_DIR="${LOCAL_ROGUE_WORKDIR:-$WORKSPACE_ROOT/rogue-workdir}"
 ACTIVITY_LOG_DIR="${LOCAL_ROGUE_LOG_DIR:-/home/davwis/.local/state/local-rogue/logs}"
 LOG_RETENTION_DAYS="${LOCAL_ROGUE_LOG_RETENTION_DAYS:-90}"
 SESSION_RETENTION_DAYS="${LOCAL_ROGUE_SESSION_RETENTION_DAYS:-90}"
+CYCLE_DELAY_SECONDS="${LOCAL_ROGUE_CYCLE_DELAY_SECONDS:-300}"
 DRY_RUN=0
 ROGUE_ARGS=()
 
@@ -94,6 +95,10 @@ for retention in "$LOG_RETENTION_DAYS" "$SESSION_RETENTION_DAYS"; do
     exit 2
   }
 done
+[[ "$CYCLE_DELAY_SECONDS" =~ ^[0-9]+$ ]] && ((CYCLE_DELAY_SECONDS <= 86400)) || {
+  printf 'ERROR: invalid cycle delay in seconds: %s\n' "$CYCLE_DELAY_SECONDS" >&2
+  exit 2
+}
 
 RUNTIME_DIR="$(mktemp -d)"
 chmod 0700 "$RUNTIME_DIR"
@@ -253,6 +258,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
     --argjson context "$CONTEXT_WINDOW" \
     --argjson logRetentionDays "$LOG_RETENTION_DAYS" \
     --argjson sessionRetentionDays "$SESSION_RETENTION_DAYS" \
+    --argjson cycleDelaySeconds "$CYCLE_DELAY_SECONDS" \
     --argjson masked "$masked_json" \
     --argjson maskedDirectories "$masked_directories_json" \
     --arg gitleaksVersion "$GITLEAKS_VERSION" \
@@ -286,6 +292,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
         accessibleToAgent: false
       },
       conversationRetentionDays: $sessionRetentionDays,
+      cycleDelaySeconds: $cycleDelaySeconds,
       permissionNote: {
         source: $permissionsNote,
         target: ($containerWorkdir + "/00-READ-ME-FIRST.md"),
@@ -636,7 +643,7 @@ for relative in "${MASKED_CREDENTIALS[@]}"; do
   }
   DOCKER_ARGS+=(--mount "type=bind,src=$MASK_FILE,dst=/workspace/$relative,readonly")
 done
-DOCKER_ARGS+=("$IMAGE" "${ROGUE_ARGS[@]}")
+DOCKER_ARGS+=("$IMAGE" --cycle-delay "$CYCLE_DELAY_SECONDS" "${ROGUE_ARGS[@]}")
 
 docker "${DOCKER_ARGS[@]}" >/dev/null
 log_metadata "event=session_start model=$MODEL context=$CONTEXT_WINDOW reasoning=xhigh egress=vpn rogue_revision=$REVISION"

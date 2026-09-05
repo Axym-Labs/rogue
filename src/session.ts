@@ -4,10 +4,10 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ContextCompactionState } from "./context-compaction.js";
 import { redactedJson } from "./redaction.js";
+import { autonomousCycleFromPrompt } from "./autonomy.js";
 
 const TRANSCRIPT_FILE = "session-transcript.jsonl";
 const STATE_FILE = "session-state.json";
-const AUTONOMOUS_WAKEUP = /^Autonomous wakeup #(\d+), please continue$/;
 
 export const INTERRUPTED_TOOL_RESULT =
   "Interrupted: the Rogue process stopped before this tool call finished. Its effect on the host is unknown; verify before assuming it did or did not happen.";
@@ -45,10 +45,7 @@ function messageText(message: AgentMessage): string {
 }
 
 function autonomousCycle(message: AgentMessage): number | undefined {
-  const match = AUTONOMOUS_WAKEUP.exec(messageText(message));
-  if (!match) return undefined;
-  const cycle = Number(match[1]);
-  return Number.isSafeInteger(cycle) && cycle > 0 ? cycle : undefined;
+  return autonomousCycleFromPrompt(messageText(message));
 }
 
 /**

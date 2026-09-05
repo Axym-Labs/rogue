@@ -139,9 +139,9 @@ function render(d){
   if(!m||m.role==='toolResult')continue;
   visible+=1;
   if(m.role==='user'){
-   const text=contentText(m.content),wake=text.match(/^Autonomous wakeup #([0-9]+), please continue$/);
+   const text=contentText(m.content),wake=text.match(/^Autonomous wakeup #([0-9]+), please continue$|^Rogue runtime wakeup #([0-9]+)\./);
    // A bare wakeup is scaffolding, not conversation: show it as a chapter rule.
-   if(wake){root.append(make('div','divider','Wakeup #'+wake[1]+(m.timestamp?' · '+ago(m.timestamp):'')));continue}
+   if(wake){root.append(make('div','divider','Wakeup #'+(wake[1]||wake[2])+(m.timestamp?' · '+ago(m.timestamp):'')));continue}
    const box=turn('you','YOU','You',m.timestamp);box.main.append(make('div','prose',text));root.append(box);continue;
   }
   if(m.role==='assistant'){

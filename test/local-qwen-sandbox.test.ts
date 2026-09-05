@@ -25,6 +25,7 @@ describe("local Qwen Docker boundary", () => {
         LOCAL_ROGUE_WORKSPACE_ROOT: workspace,
         LOCAL_ROGUE_WORKDIR: workdir,
         LOCAL_ROGUE_LOG_DIR: logDir,
+        LOCAL_ROGUE_CYCLE_DELAY_SECONDS: "42",
       },
     });
     const plan = JSON.parse(stdout);
@@ -44,6 +45,7 @@ describe("local Qwen Docker boundary", () => {
       accessibleToAgent: false,
     });
     expect(plan.conversationRetentionDays).toBe(90);
+    expect(plan.cycleDelaySeconds).toBe(42);
     expect(plan.permissionNote).toEqual({
       source: path.join(repositoryRoot, "config", "00-READ-ME-FIRST.md"),
       target: "/workspace/rogue-workdir/00-READ-ME-FIRST.md",
@@ -84,6 +86,7 @@ describe("local Qwen Docker boundary", () => {
     expect(plan.model).toBe("claude-opus-4-6[1m]");
     expect(plan.contextWindow).toBe(229376);
     expect(plan.reasoning).toBe("xhigh");
+    expect(plan.cycleDelaySeconds).toBe(300);
     expect(plan.network).toBe("vpn-only");
     expect(plan.vpnGateway).toMatchObject({
       image: "qmcgaw/gluetun@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027",
