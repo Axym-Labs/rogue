@@ -12,16 +12,18 @@ node rogue.js
 
 ## Axym Labs: contained local Qwen
 
-From the project Rogue may modify, run `local-rogue`. The Axym Labs wrapper
-starts the existing Qwen 27B NInfer service only for that session, pins Rogue to
-it with `xhigh` reasoning and no provider failover, and stops both containers
-when the wrapper closes.
+Run `local-rogue` from anywhere. The Axym Labs wrapper starts the existing Qwen
+27B NInfer service only for that session, pins Rogue to it with `xhigh` reasoning
+and no provider failover, and stops both containers when the wrapper closes.
 
-Docker exposes exactly the current project read-write plus dedicated Rogue
-state. The root filesystem is read-only; Rogue is non-root and receives no Linux
-capabilities, host namespaces, Docker socket, host home, Internet route, or
-credential-shaped files found inside the project. Run `local-rogue --dry-run`
-to inspect that boundary without starting Docker or Qwen.
+Docker exposes the complete `/home/davwis/main/workspace` tree read-only. Only
+`/home/davwis/main/workspace/rogue-workdir` is writable, and that is Rogue's
+working directory. Its private state uses a separate Docker volume. The root
+filesystem is read-only; Rogue is non-root and receives no Linux capabilities,
+host namespaces, Docker socket, host home, Internet route, or
+credential-shaped files found anywhere in the workspace. Run
+`local-rogue --dry-run` to inspect that boundary without starting Docker or
+Qwen.
 
 The terminal shows at most 1,200 characters of reasoning per turn plus bounded,
 sanitized tool arguments and results. Rogue's existing read-only transcript

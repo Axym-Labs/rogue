@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run Rogue against local Qwen inside a Docker-enforced project boundary.
+# Run Rogue against local Qwen inside a Docker-enforced workspace boundary.
 set -euo pipefail
 
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
@@ -10,13 +10,17 @@ LOCAL_LLM_START="${LOCAL_LLM_START:-$LOCAL_LLM_ROOT/scripts/start-local-llm-ninf
 MODEL="${ROGUE_LOCAL_MODEL:-claude-opus-4-6[1m]}"
 CONTEXT_WINDOW="${ROGUE_LOCAL_CONTEXT:-229376}"
 IMAGE="${ROGUE_LOCAL_IMAGE:-axym/rogue-local-qwen:latest}"
-PROJECT="$(pwd -P)"
+WORKSPACE_ROOT="${LOCAL_ROGUE_WORKSPACE_ROOT:-/home/davwis/main/workspace}"
+WRITABLE_DIR="${LOCAL_ROGUE_WORKDIR:-$WORKSPACE_ROOT/rogue-workdir}"
 DRY_RUN=0
 ROGUE_ARGS=()
 
 usage() {
   printf '%s\n' \
-    'Usage: local-qwen-sandbox.sh [--project DIR] [--dry-run] [-- ROGUE_ARGS...]' \
+    'Usage: local-qwen-sandbox.sh [--dry-run] [-- ROGUE_ARGS...]' \
+    '' \
+    'The complete ~/main/workspace tree is visible read-only. Only' \
+    '~/main/workspace/rogue-workdir is writable.' \
     '' \
     'The default Rogue mode is continuous autonomy. The local Qwen server and' \
     'sandbox live only while this wrapper is running; Ctrl-C closes both.'
@@ -25,9 +29,8 @@ usage() {
 while (($#)); do
   case "$1" in
     --project)
-      [[ $# -ge 2 ]] || { printf '%s\n' 'ERROR: --project requires a directory' >&2; exit 2; }
-      PROJECT="$2"
-      shift 2
+      printf '%s\n' 'ERROR: --project is obsolete; local-rogue exposes the full workspace read-only' >&2
+      exit 2
       ;;
     --dry-run)
       DRY_RUN=1
@@ -49,14 +52,26 @@ while (($#)); do
   esac
 done
 
-[[ -d "$PROJECT" ]] || { printf 'ERROR: project directory does not exist: %s\n' "$PROJECT" >&2; exit 2; }
-PROJECT="$(realpath "$PROJECT")"
-[[ "$PROJECT" != / ]] || { printf '%s\n' 'ERROR: refusing to expose the filesystem root as a project' >&2; exit 2; }
+[[ -d "$WORKSPACE_ROOT" ]] || { printf 'ERROR: workspace directory does not exist: %s\n' "$WORKSPACE_ROOT" >&2; exit 2; }
+WORKSPACE_ROOT="$(realpath "$WORKSPACE_ROOT")"
+[[ "$WORKSPACE_ROOT" != / ]] || { printf '%s\n' 'ERROR: refusing to expose the filesystem root as a workspace' >&2; exit 2; }
 
-# File names only: values are deliberately never opened. The project bind is
-# the complete host view; these nested empty-file mounts hide common secrets.
+WRITABLE_DIR="$(realpath -m "$WRITABLE_DIR")"
+case "$WRITABLE_DIR" in
+  "$WORKSPACE_ROOT"/*) ;;
+  *) printf 'ERROR: writable directory must be inside the workspace: %s\n' "$WRITABLE_DIR" >&2; exit 2 ;;
+esac
+mkdir -p "$WRITABLE_DIR"
+WRITABLE_DIR="$(realpath "$WRITABLE_DIR")"
+[[ "$WRITABLE_DIR" != "$WORKSPACE_ROOT" ]] || { printf '%s\n' 'ERROR: the complete workspace cannot be writable' >&2; exit 2; }
+WRITABLE_RELATIVE="${WRITABLE_DIR#"$WORKSPACE_ROOT"/}"
+CONTAINER_WRITABLE_DIR="/workspace/$WRITABLE_RELATIVE"
+
+# File names only: values are deliberately never opened. The workspace bind is
+# the complete read-only host view; these nested empty-file mounts hide common
+# secrets in both the read-only tree and the nested writable directory.
 mapfile -d '' MASKED_CREDENTIALS < <(
-  find "$PROJECT" -xdev -type f \
+  find "$WORKSPACE_ROOT" -xdev -type f \
     \( \
       -name '.env' -o -name '.env.*' -o \
       -name '*.pem' -o -name '*.key' -o \
@@ -73,19 +88,25 @@ mapfile -d '' MASKED_CREDENTIALS < <(
 masked_json="$({ for item in "${MASKED_CREDENTIALS[@]}"; do printf '%s\0' "$item"; done; } | jq -Rs 'split("\u0000")[:-1]')"
 if [[ "$DRY_RUN" == 1 ]]; then
   jq -n \
-    --arg project "$PROJECT" \
+    --arg workspace "$WORKSPACE_ROOT" \
+    --arg workdir "$WRITABLE_DIR" \
+    --arg containerWorkdir "$CONTAINER_WRITABLE_DIR" \
     --arg repository "$REPOSITORY" \
     --arg model "$MODEL" \
     --argjson context "$CONTEXT_WINDOW" \
     --argjson masked "$masked_json" \
     '{
-      project: $project,
+      workspace: $workspace,
+      workdir: $workdir,
       repository: $repository,
       model: $model,
       contextWindow: $context,
       reasoning: "xhigh",
       network: "internal",
-      mounts: [{source: $project, target: "/workspace", mode: "rw"}],
+      mounts: [
+        {source: $workspace, target: "/workspace", mode: "ro"},
+        {source: $workdir, target: $containerWorkdir, mode: "rw"}
+      ],
       maskedCredentials: $masked,
       security: {
         readOnlyRoot: true,
@@ -115,7 +136,7 @@ if [[ "$BUILT_REVISION" != "$REVISION" ]]; then
     "$REPOSITORY"
 fi
 
-TOKEN="$(printf '%s' "$PROJECT" | sha256sum | cut -c1-12)"
+TOKEN="$(printf '%s' "$WORKSPACE_ROOT" | sha256sum | cut -c1-12)"
 NETWORK="axym-rogue-$TOKEN-$$"
 CONTAINER="axym-rogue-$TOKEN-$$"
 STATE_VOLUME="axym-rogue-state-$TOKEN"
@@ -191,14 +212,15 @@ DOCKER_ARGS=(
   --cpus 8
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m
   --env HOME=/tmp
-  --env ROGUE_WORKSPACE=/workspace
+  --env "ROGUE_WORKSPACE=$CONTAINER_WRITABLE_DIR"
   --env ROGUE_STATE_DIR=/state
   --env ROGUE_BOOTSTRAP=/state/initial_auth.json
   --env ROGUE_INITIAL_AUTH_FILE=/run/rogue/initial_auth.json
   --env ROGUE_THINKING=xhigh
   --env ROGUE_CACHE_RETENTION=none
   --env 'ROGUE_EXTRA_ARGS=--no-failover'
-  --mount "type=bind,src=$PROJECT,dst=/workspace"
+  --mount "type=bind,src=$WORKSPACE_ROOT,dst=/workspace,readonly"
+  --mount "type=bind,src=$WRITABLE_DIR,dst=$CONTAINER_WRITABLE_DIR"
   --mount "type=volume,src=$STATE_VOLUME,dst=/state"
   --mount "type=bind,src=$BOOTSTRAP,dst=/run/rogue/initial_auth.json,readonly"
 )
@@ -212,8 +234,8 @@ done
 DOCKER_ARGS+=("$IMAGE" "${ROGUE_ARGS[@]}")
 
 docker "${DOCKER_ARGS[@]}" >/dev/null
-printf 'Rogue is contained in %s; %d credential file(s) are hidden. Ctrl-C stops Rogue and Qwen.\n' \
-  "$PROJECT" "${#MASKED_CREDENTIALS[@]}" >&2
+printf 'Rogue can read %s and write only %s; %d credential file(s) are hidden. Ctrl-C stops Rogue and Qwen.\n' \
+  "$WORKSPACE_ROOT" "$WRITABLE_DIR" "${#MASKED_CREDENTIALS[@]}" >&2
 FIRST_LOG=1
 while docker inspect "$CONTAINER" >/dev/null 2>&1; do
   if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" != true ]]; then

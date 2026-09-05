@@ -10,17 +10,51 @@ const repositoryRoot = path.resolve(".");
 const script = path.join(repositoryRoot, "scripts/local-qwen-sandbox.sh");
 
 describe("local Qwen Docker boundary", () => {
-  it("describes a least-privilege project mount and credential masks", async () => {
-    const project = await mkdtemp(path.join(tmpdir(), "rogue-project-"));
-    await mkdir(path.join(project, "nested"));
-    await writeFile(path.join(project, ".env"), "SECRET=never-read\n");
-    await writeFile(path.join(project, ".env.example"), "SECRET=example\n");
-    await writeFile(path.join(project, "nested", "service.key"), "never-read\n");
+  it("defaults to the complete configured workspace instead of the current project", async () => {
+    const workspace = await mkdtemp(path.join(tmpdir(), "rogue-workspace-"));
+    const currentProject = path.join(workspace, "project-a");
+    const workdir = path.join(workspace, "rogue-workdir");
+    await mkdir(currentProject);
+    await mkdir(workdir);
 
-    const { stdout } = await execFileAsync("bash", [script, "--dry-run", "--project", project]);
+    const { stdout } = await execFileAsync("bash", [script, "--dry-run"], {
+      cwd: currentProject,
+      env: {
+        ...process.env,
+        LOCAL_ROGUE_WORKSPACE_ROOT: workspace,
+        LOCAL_ROGUE_WORKDIR: workdir,
+      },
+    });
     const plan = JSON.parse(stdout);
 
-    expect(plan.project).toBe(project);
+    expect(plan.workspace).toBe(workspace);
+    expect(plan.workdir).toBe(workdir);
+    expect(plan.mounts).toEqual([
+      { source: workspace, target: "/workspace", mode: "ro" },
+      { source: workdir, target: "/workspace/rogue-workdir", mode: "rw" },
+    ]);
+  });
+
+  it("describes a read-only workspace, isolated writable folder, and credential masks", async () => {
+    const workspace = await mkdtemp(path.join(tmpdir(), "rogue-workspace-"));
+    const workdir = path.join(workspace, "rogue-workdir");
+    await mkdir(path.join(workspace, "nested"));
+    await mkdir(workdir);
+    await writeFile(path.join(workspace, ".env"), "SECRET=never-read\n");
+    await writeFile(path.join(workspace, ".env.example"), "SECRET=example\n");
+    await writeFile(path.join(workspace, "nested", "service.key"), "never-read\n");
+
+    const { stdout } = await execFileAsync("bash", [script, "--dry-run"], {
+      env: {
+        ...process.env,
+        LOCAL_ROGUE_WORKSPACE_ROOT: workspace,
+        LOCAL_ROGUE_WORKDIR: workdir,
+      },
+    });
+    const plan = JSON.parse(stdout);
+
+    expect(plan.workspace).toBe(workspace);
+    expect(plan.workdir).toBe(workdir);
     expect(plan.model).toBe("claude-opus-4-6[1m]");
     expect(plan.contextWindow).toBe(229376);
     expect(plan.reasoning).toBe("xhigh");
@@ -33,23 +67,40 @@ describe("local Qwen Docker boundary", () => {
       hostNamespaces: false,
       internet: false,
     });
-    expect(plan.mounts).toContainEqual({ source: project, target: "/workspace", mode: "rw" });
+    expect(plan.mounts).toEqual([
+      { source: workspace, target: "/workspace", mode: "ro" },
+      { source: workdir, target: "/workspace/rogue-workdir", mode: "rw" },
+    ]);
     expect(plan.maskedCredentials).toEqual([".env", "nested/service.key"]);
     expect(plan.maskedCredentials).not.toContain(".env.example");
   });
 
-  it("refuses filesystem root as a project", async () => {
-    await expect(execFileAsync("bash", [script, "--dry-run", "--project", "/"])).rejects.toMatchObject({
-      stderr: expect.stringContaining("filesystem root"),
-    });
+  it("refuses filesystem root as a workspace", async () => {
+    await expect(
+      execFileAsync("bash", [script, "--dry-run"], {
+        env: {
+          ...process.env,
+          LOCAL_ROGUE_WORKSPACE_ROOT: "/",
+          LOCAL_ROGUE_WORKDIR: "/tmp/rogue-workdir",
+        },
+      }),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("filesystem root") });
   });
 
   it("resolves its repository when invoked through an alias symlink", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "rogue-alias-"));
+    const workdir = path.join(directory, "rogue-workdir");
+    await mkdir(workdir);
     const alias = path.join(directory, "local-rogue");
     await symlink(script, alias);
-    const { stdout } = await execFileAsync("bash", [alias, "--dry-run", "--project", directory]);
-    expect(JSON.parse(stdout)).toMatchObject({ project: directory, repository: repositoryRoot });
+    const { stdout } = await execFileAsync("bash", [alias, "--dry-run"], {
+      env: {
+        ...process.env,
+        LOCAL_ROGUE_WORKSPACE_ROOT: directory,
+        LOCAL_ROGUE_WORKDIR: workdir,
+      },
+    });
+    expect(JSON.parse(stdout)).toMatchObject({ workspace: directory, workdir, repository: repositoryRoot });
   });
 
   it("keeps supervising if the agent process exits itself", async () => {
