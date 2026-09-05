@@ -102,6 +102,7 @@ if [ "${ROGUE_AUTO_SELECT:-1}" = "1" ]; then set -- --auto-select "$@"; fi
 if [ -n "${ROGUE_THINKING:-}" ]; then set -- --thinking "$ROGUE_THINKING" "$@"; fi
 if [ -n "${ROGUE_CACHE_RETENTION:-}" ]; then set -- --cache-retention "$ROGUE_CACHE_RETENTION" "$@"; fi
 if [ -n "${ROGUE_MAX_CYCLES:-}" ]; then set -- --max-cycles "$ROGUE_MAX_CYCLES" "$@"; fi
+if [ -n "${ROGUE_SESSION_RETENTION_DAYS:-}" ]; then set -- --session-retention-days "$ROGUE_SESSION_RETENTION_DAYS" "$@"; fi
 # Deliberate word splitting: this variable carries several flags.
 # shellcheck disable=SC2086
 if [ -n "${ROGUE_EXTRA_ARGS:-}" ]; then set -- $ROGUE_EXTRA_ARGS "$@"; fi

@@ -20,6 +20,8 @@ export interface RogueAgentOptions {
   allowFailover?: boolean;
   /** Prompt cache retention requested from every provider. Defaults to "long". */
   cacheRetention?: CacheRetention;
+  /** Delete raw transcript turns older than this many days on restart. */
+  sessionRetentionDays?: number;
   onFailover?: (notice: ModelFailoverNotice) => void;
   onStateError?: (error: unknown) => void;
 }
@@ -66,7 +68,10 @@ export async function createRogueAgent(options: RogueAgentOptions = {}): Promise
   if (!profile) throw new Error("No agent profile. Complete Rogue's one-time persona selection.");
   const memorySummary = await store.memorySummary();
   const nostr = new NostrService(stateDirectory);
-  const session = new SessionStore(stateDirectory, { onError: options.onStateError });
+  const session = new SessionStore(stateDirectory, {
+    onError: options.onStateError,
+    retentionDays: options.sessionRetentionDays,
+  });
   const restored = await session.load();
   const contextCompactor = createAutomaticContextCompactor({
     models,

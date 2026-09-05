@@ -110,12 +110,23 @@ export class SessionStore {
   private queue: Promise<void> = Promise.resolve();
   private state: PersistedSessionState = { cycle: 0, updatedAt: new Date(0).toISOString() };
   private readonly onError: (error: unknown) => void;
+  private readonly retentionDays?: number;
+  private readonly now: () => number;
 
-  constructor(stateDirectory: string, options: { onError?: (error: unknown) => void } = {}) {
+  constructor(
+    stateDirectory: string,
+    options: { onError?: (error: unknown) => void; retentionDays?: number; now?: () => number } = {},
+  ) {
     this.directory = path.resolve(stateDirectory);
     this.transcriptPath = path.join(this.directory, TRANSCRIPT_FILE);
     this.statePath = path.join(this.directory, STATE_FILE);
     this.onError = options.onError ?? (() => {});
+    if (options.retentionDays !== undefined
+      && (!Number.isSafeInteger(options.retentionDays) || options.retentionDays < 1)) {
+      throw new Error(`Invalid session retention: ${options.retentionDays}`);
+    }
+    this.retentionDays = options.retentionDays;
+    this.now = options.now ?? Date.now;
   }
 
   private async serialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -136,8 +147,11 @@ export class SessionStore {
 
   /** Read the persisted conversation, repairing anything a kill left half-written. */
   async load(): Promise<RestoredSession> {
-    const messages = await this.readTranscript();
+    let messages = await this.readTranscript();
     const state = await this.readState();
+    if (this.retentionDays !== undefined) {
+      messages = await this.pruneExpiredTranscript(messages, state);
+    }
     // The transcript is authoritative. If a process died after appending a
     // wakeup but before updating the sidecar, recover its number from the log.
     const transcriptCycle = messages.reduce((latest, message) => autonomousCycle(message) ?? latest, 0);
@@ -168,6 +182,44 @@ export class SessionStore {
       resumable,
       activeCycle,
     };
+  }
+
+  /**
+   * Bound raw transcript growth on restart while retaining complete turns.
+   * Messages without a usable timestamp are kept because their age cannot be
+   * established safely. Compaction indexes are cleared after a rewrite since
+   * they refer to positions in the pre-pruned transcript.
+   */
+  private async pruneExpiredTranscript(
+    messages: AgentMessage[],
+    state: PersistedSessionState,
+  ): Promise<AgentMessage[]> {
+    const cutoff = this.now() - this.retentionDays! * 86_400_000;
+    let firstRetained = messages.findIndex((message) => {
+      const timestamp = (message as { timestamp?: unknown }).timestamp;
+      return typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp >= cutoff;
+    });
+    if (firstRetained < 0) firstRetained = messages.length;
+    // A recent assistant/tool result needs the user message that began its turn.
+    if (firstRetained < messages.length) {
+      while (firstRetained > 0 && messages[firstRetained]?.role !== "user") firstRetained -= 1;
+    }
+    if (firstRetained === 0) return messages;
+
+    const retained = messages.slice(firstRetained);
+    await this.ensureDirectory();
+    const temporary = `${this.transcriptPath}.${crypto.randomUUID()}.tmp`;
+    const serialized = retained.map((message) => `${redactedJson(message)}\n`).join("");
+    await writeFile(temporary, serialized, { mode: 0o600 });
+    await rename(temporary, this.transcriptPath);
+    if (state.compaction !== undefined) {
+      delete state.compaction;
+      const stateTemporary = `${this.statePath}.${crypto.randomUUID()}.tmp`;
+      state.updatedAt = new Date(this.now()).toISOString();
+      await writeFile(stateTemporary, `${redactedJson(state, 2)}\n`, { mode: 0o600 });
+      await rename(stateTemporary, this.statePath);
+    }
+    return retained;
   }
 
   private async readTranscript(): Promise<AgentMessage[]> {

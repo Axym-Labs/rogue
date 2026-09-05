@@ -17,7 +17,7 @@ import { isDurableMessage, SessionStore } from "./session.js";
 import { createRogueModels, verifyBundledProviderRuntime } from "./provider-runtime.js";
 import { parseCustomProviderSpec, saveCustomProvider } from "./custom-providers.js";
 import { RogueConfigStore } from "./config.js";
-import { addCacheUsage, emptyCacheUsage, formatCacheUsage, type CacheUsageTotals } from "./cache-usage.js";
+import { addCacheUsage, emptyCacheUsage, formatCacheUsage, formatCycleUsage, type CacheUsageTotals } from "./cache-usage.js";
 import { importInitialAuthentication } from "./initial-auth.js";
 import * as ui from "./ui.js";
 import type { CacheRetention } from "@earendil-works/pi-ai";
@@ -43,6 +43,7 @@ interface CliOptions {
   prompt?: string;
   interactive: boolean;
   maxCycles?: number;
+  sessionRetentionDays?: number;
   autoSelectPersona: boolean;
   authenticate: boolean;
   authProvider?: string;
@@ -80,6 +81,7 @@ Options:
   --thinking <level> off|minimal|low|medium|high|xhigh|max
   --interactive      Start the supervised chat interface
   --max-cycles <n>   Stop after n attempted cycles (default: run forever)
+  --session-retention-days <n> Delete raw transcript turns older than n days on restart
   --fresh-session    Discard the persisted conversation and start a new one
   --auto-select      Select the first generated persona without prompting
   --auth [provider]  Browse providers, authenticate, choose models, and exit
@@ -143,6 +145,11 @@ export function parseArgs(args: string[]): CliOptions {
       options.cacheRetention = value as CacheRetention;
     }
     else if (arg === "--fresh-session") options.freshSession = true;
+    else if (arg === "--session-retention-days") {
+      const value = Number(takeValue(args, index++, arg));
+      if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Invalid session retention: ${value}`);
+      options.sessionRetentionDays = value;
+    }
     else if (arg === "--max-cycles") {
       const value = Number(takeValue(args, index++, arg));
       if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Invalid max cycles: ${value}`);
@@ -378,6 +385,7 @@ async function main(): Promise<void> {
   let liveMessage: unknown;
   let sessionUsage: CacheUsageTotals = emptyCacheUsage();
   let cycleUsage: CacheUsageTotals = emptyCacheUsage();
+  let cycleStartedAt = Date.now();
   const thinkingTrace = new BoundedThinkingTrace();
   let thinkingOpen = false;
   const closeThinking = (): void => {
@@ -551,13 +559,28 @@ async function main(): Promise<void> {
     ]);
 
     const recordResult = async (result: AutonomousCycleResult): Promise<void> => {
+      const finishedAt = Date.now();
+      const durationMs = Math.max(0, finishedAt - cycleStartedAt);
       await store.recordAutonomyCycle({
         cycle: result.cycle,
         prompt: result.resumed ? `Resumed interrupted cycle #${result.cycle}` : buildAutonomousCyclePrompt(result.cycle),
         ok: result.ok,
         output: result.output,
         error: result.error,
+        startedAt: new Date(cycleStartedAt).toISOString(),
+        durationMs,
+        provider,
+        model,
+        thinkingLevel: options.thinkingLevel ?? "medium",
+        usage: {
+          input: cycleUsage.input,
+          output: cycleUsage.output,
+          cacheRead: cycleUsage.cacheRead,
+          cacheWrite: cycleUsage.cacheWrite,
+          requests: cycleUsage.requests,
+        },
       });
+      process.stderr.write(`  ${ui.style.faint(`cycle ${result.cycle} · ${formatCycleUsage(cycleUsage, durationMs)}`)}\n`);
       if (!result.ok) process.stderr.write(`  ${ui.style.danger("✖")} cycle ${result.cycle} failed: ${result.error}\n`);
     };
 
@@ -567,6 +590,8 @@ async function main(): Promise<void> {
       maxCycles: options.maxCycles,
       signal: controller.signal,
       async onCycleStart(request: AutonomousCycleRequest) {
+        cycleUsage = emptyCacheUsage();
+        cycleStartedAt = Date.now();
         const label = request.resume ? `resuming autonomous cycle ${request.cycle}` : `autonomous cycle ${request.cycle}`;
         process.stderr.write(`\n  ${ui.style.accent("◆")} ${ui.style.faint(label)}\n`);
       },

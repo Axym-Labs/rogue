@@ -32,13 +32,23 @@ port. Run
 `local-rogue --dry-run` to inspect that boundary without starting Docker or
 Qwen.
 
+An immutable `00-READ-ME-FIRST.md` is mounted at the top of the writable folder
+so every session sees a concise statement of its actual read, write, network,
+credential, and lifecycle limits before doing work.
+
 The terminal shows at most 1,200 characters of reasoning per turn plus bounded,
 sanitized tool arguments and results. Rogue's existing read-only transcript
 viewer remains the complete detailed record. The same terminal activity is
 appended to private daily files at
 `~/.local/state/local-rogue/logs/YYYY-MM-DD.log`. This directory is outside the
-workspace mount and is not visible to Rogue. `Ctrl-C` removes both containers
-and the private network in one pass.
+workspace mount and is not visible to Rogue. Lines carry UTC timestamps and a
+non-secret session identifier; session start/stop and per-cycle duration,
+provider/model, reasoning level, and input/output/cache token counts are also
+recorded. Raw activity files and raw transcript turns are retained for 90 days
+and pruned on startup. Durable memories, initiatives, summaries, and project
+notes are not age-pruned. Override the windows with
+`LOCAL_ROGUE_LOG_RETENTION_DAYS` and `LOCAL_ROGUE_SESSION_RETENTION_DAYS`.
+`Ctrl-C` removes both containers and the private network in one pass.
 
 ## Keeping up with the Agents
 

@@ -41,6 +41,18 @@ export interface AutonomyCycle {
   ok: boolean;
   output?: string;
   error?: string;
+  startedAt: string;
+  durationMs: number;
+  provider: string;
+  model: string;
+  thinkingLevel: string;
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    requests: number;
+  };
   createdAt: string;
 }
 

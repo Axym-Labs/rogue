@@ -38,7 +38,16 @@ describe("local Qwen Docker boundary", () => {
     expect(plan.activityLogs).toEqual({
       directory: logDir,
       rolling: "daily",
+      retentionDays: 90,
+      timestamps: "UTC",
+      sessionTagged: true,
       accessibleToAgent: false,
+    });
+    expect(plan.conversationRetentionDays).toBe(90);
+    expect(plan.permissionNote).toEqual({
+      source: path.join(repositoryRoot, "config", "00-READ-ME-FIRST.md"),
+      target: "/workspace/rogue-workdir/00-READ-ME-FIRST.md",
+      mode: "ro",
     });
     expect(plan.mounts.every((mount: { source: string }) => mount.source !== logDir)).toBe(true);
   });

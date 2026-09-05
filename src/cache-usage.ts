@@ -63,3 +63,16 @@ export function formatCacheUsage(totals: CacheUsageTotals): string {
   if (totals.cost > 0) parts.push(`$${totals.cost.toFixed(4)}`);
   return parts.join(" · ");
 }
+
+/** Compact per-cycle runtime and token accounting for operators and logs. */
+export function formatCycleUsage(totals: CacheUsageTotals, durationMs: number): string {
+  const seconds = Math.max(0, durationMs) / 1_000;
+  return [
+    `${seconds.toFixed(1)}s`,
+    `${count(totals.requests)} request${totals.requests === 1 ? "" : "s"}`,
+    `${count(totals.input)} input`,
+    `${count(totals.output)} output`,
+    `${count(totals.cacheRead)} cache-read`,
+    `${count(totals.cacheWrite)} cache-written`,
+  ].join(" · ");
+}

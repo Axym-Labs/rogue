@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPOSITORY="$(dirname "$SCRIPT_DIR")"
 ACTIVITY_LOGGER="$SCRIPT_DIR/append-daily-log.sh"
 GITLEAKS_CONFIG="$REPOSITORY/config/gitleaks-sandbox.toml"
+PERMISSIONS_NOTE="$REPOSITORY/config/00-READ-ME-FIRST.md"
 LOCAL_LLM_ROOT="${LOCAL_LLM_ROOT:-/home/davwis/main/harness/local-llm}"
 LOCAL_LLM_START="${LOCAL_LLM_START:-$LOCAL_LLM_ROOT/scripts/start-local-llm-ninfer.sh}"
 MODEL="${ROGUE_LOCAL_MODEL:-claude-opus-4-6[1m]}"
@@ -15,6 +16,8 @@ IMAGE="${ROGUE_LOCAL_IMAGE:-axym/rogue-local-qwen:latest}"
 WORKSPACE_ROOT="${LOCAL_ROGUE_WORKSPACE_ROOT:-/home/davwis/main/workspace}"
 WRITABLE_DIR="${LOCAL_ROGUE_WORKDIR:-$WORKSPACE_ROOT/rogue-workdir}"
 ACTIVITY_LOG_DIR="${LOCAL_ROGUE_LOG_DIR:-/home/davwis/.local/state/local-rogue/logs}"
+LOG_RETENTION_DAYS="${LOCAL_ROGUE_LOG_RETENTION_DAYS:-90}"
+SESSION_RETENTION_DAYS="${LOCAL_ROGUE_SESSION_RETENTION_DAYS:-90}"
 DRY_RUN=0
 ROGUE_ARGS=()
 
@@ -81,6 +84,13 @@ esac
 command -v bwrap >/dev/null || { printf '%s\n' 'ERROR: bubblewrap is required for isolated secret scanning' >&2; exit 1; }
 command -v gitleaks >/dev/null || { printf '%s\n' 'ERROR: Gitleaks is required for preflight secret scanning' >&2; exit 1; }
 [[ -f "$GITLEAKS_CONFIG" ]] || { printf 'ERROR: Gitleaks config not found: %s\n' "$GITLEAKS_CONFIG" >&2; exit 1; }
+[[ -f "$PERMISSIONS_NOTE" ]] || { printf 'ERROR: permissions note not found: %s\n' "$PERMISSIONS_NOTE" >&2; exit 1; }
+for retention in "$LOG_RETENTION_DAYS" "$SESSION_RETENTION_DAYS"; do
+  [[ "$retention" =~ ^[0-9]+$ ]] && ((retention >= 1 && retention <= 3650)) || {
+    printf 'ERROR: invalid retention period: %s\n' "$retention" >&2
+    exit 2
+  }
+done
 
 RUNTIME_DIR="$(mktemp -d)"
 chmod 0700 "$RUNTIME_DIR"
@@ -232,9 +242,12 @@ if [[ "$DRY_RUN" == 1 ]]; then
     --arg workdir "$WRITABLE_DIR" \
     --arg containerWorkdir "$CONTAINER_WRITABLE_DIR" \
     --arg activityLogDir "$ACTIVITY_LOG_DIR" \
+    --arg permissionsNote "$PERMISSIONS_NOTE" \
     --arg repository "$REPOSITORY" \
     --arg model "$MODEL" \
     --argjson context "$CONTEXT_WINDOW" \
+    --argjson logRetentionDays "$LOG_RETENTION_DAYS" \
+    --argjson sessionRetentionDays "$SESSION_RETENTION_DAYS" \
     --argjson masked "$masked_json" \
     --argjson maskedDirectories "$masked_directories_json" \
     --arg gitleaksVersion "$GITLEAKS_VERSION" \
@@ -254,7 +267,16 @@ if [[ "$DRY_RUN" == 1 ]]; then
       activityLogs: {
         directory: $activityLogDir,
         rolling: "daily",
+        retentionDays: $logRetentionDays,
+        timestamps: "UTC",
+        sessionTagged: true,
         accessibleToAgent: false
+      },
+      conversationRetentionDays: $sessionRetentionDays,
+      permissionNote: {
+        source: $permissionsNote,
+        target: ($containerWorkdir + "/00-READ-ME-FIRST.md"),
+        mode: "ro"
       },
       maskedCredentials: $masked,
       maskedDirectories: $maskedDirectories,
@@ -295,6 +317,15 @@ command -v docker >/dev/null || { printf '%s\n' 'ERROR: Docker is required' >&2;
 mkdir -p "$ACTIVITY_LOG_DIR"
 chmod 0700 "$ACTIVITY_LOG_DIR"
 
+PERMISSIONS_TARGET="$WRITABLE_DIR/00-READ-ME-FIRST.md"
+if [[ -L "$PERMISSIONS_TARGET" ]]; then
+  rm "$PERMISSIONS_TARGET"
+elif [[ -e "$PERMISSIONS_TARGET" && ! -f "$PERMISSIONS_TARGET" ]]; then
+  printf 'ERROR: permissions-note target is not a regular file: %s\n' "$PERMISSIONS_TARGET" >&2
+  exit 2
+fi
+install -m 0444 "$PERMISSIONS_NOTE" "$PERMISSIONS_TARGET"
+
 REVISION="$(git -C "$REPOSITORY" rev-parse HEAD)"
 BUILT_REVISION="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>/dev/null || true)"
 if [[ "$BUILT_REVISION" != "$REVISION" ]]; then
@@ -308,6 +339,7 @@ if [[ "$BUILT_REVISION" != "$REVISION" ]]; then
 fi
 
 TOKEN="$(printf '%s' "$WORKSPACE_ROOT" | sha256sum | cut -c1-12)"
+LOG_SESSION="$TOKEN-$$"
 NETWORK="axym-rogue-$TOKEN-$$"
 CONTAINER="axym-rogue-$TOKEN-$$"
 STATE_VOLUME="axym-rogue-state-$TOKEN"
@@ -318,7 +350,16 @@ MODEL_LOG="$RUNTIME_DIR/model.log"
 LOG_FIFO="$RUNTIME_DIR/activity.pipe"
 DOCKER_LOG_PID=0
 LOG_READER_PID=0
+SESSION_LOGGED=0
 mkfifo "$LOG_FIFO"
+
+log_metadata() {
+  printf '%s\n' "$1" | \
+    LOCAL_ROGUE_LOG_DIR="$ACTIVITY_LOG_DIR" \
+    LOCAL_ROGUE_LOG_RETENTION_DAYS="$LOG_RETENTION_DAYS" \
+    LOCAL_ROGUE_LOG_SESSION="$LOG_SESSION" \
+    "$ACTIVITY_LOGGER" >/dev/null
+}
 
 cleanup() {
   trap - EXIT INT TERM HUP
@@ -329,6 +370,10 @@ cleanup() {
   if [[ "$LOG_READER_PID" != 0 ]]; then
     kill "$LOG_READER_PID" 2>/dev/null || true
     wait "$LOG_READER_PID" 2>/dev/null || true
+  fi
+  if [[ "$SESSION_LOGGED" == 1 ]]; then
+    log_metadata "event=session_stop"
+    SESSION_LOGGED=0
   fi
   docker stop --time 5 "$CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -427,9 +472,11 @@ DOCKER_ARGS=(
   --env ROGUE_INITIAL_AUTH_FILE=/run/rogue/initial_auth.json
   --env ROGUE_THINKING=xhigh
   --env ROGUE_CACHE_RETENTION=none
+  --env "ROGUE_SESSION_RETENTION_DAYS=$SESSION_RETENTION_DAYS"
   --env 'ROGUE_EXTRA_ARGS=--no-failover'
   --mount "type=bind,src=$WORKSPACE_ROOT,dst=/workspace,readonly,bind-recursive=disabled"
   --mount "type=bind,src=$WRITABLE_DIR,dst=$CONTAINER_WRITABLE_DIR,bind-recursive=disabled"
+  --mount "type=bind,src=$PERMISSIONS_NOTE,dst=$CONTAINER_WRITABLE_DIR/00-READ-ME-FIRST.md,readonly"
   --mount "type=volume,src=$STATE_VOLUME,dst=/state,volume-nocopy"
   --mount "type=bind,src=$BOOTSTRAP,dst=/run/rogue/initial_auth.json,readonly"
 )
@@ -450,6 +497,8 @@ done
 DOCKER_ARGS+=("$IMAGE" "${ROGUE_ARGS[@]}")
 
 docker "${DOCKER_ARGS[@]}" >/dev/null
+log_metadata "event=session_start model=$MODEL context=$CONTEXT_WINDOW rogue_revision=$REVISION"
+SESSION_LOGGED=1
 printf 'Rogue can read %s and write only %s; %d credential file(s) are hidden. Ctrl-C stops Rogue and Qwen.\n' \
   "$WORKSPACE_ROOT" "$WRITABLE_DIR" "${#MASKED_CREDENTIALS[@]}" >&2
 FIRST_LOG=1
@@ -459,7 +508,10 @@ while docker inspect "$CONTAINER" >/dev/null 2>&1; do
     # Ctrl-C/HUP reaches the wrapper trap instead and removes the container.
     docker start "$CONTAINER" >/dev/null 2>&1 || true
   fi
-  LOCAL_ROGUE_LOG_DIR="$ACTIVITY_LOG_DIR" "$ACTIVITY_LOGGER" <"$LOG_FIFO" &
+  LOCAL_ROGUE_LOG_DIR="$ACTIVITY_LOG_DIR" \
+    LOCAL_ROGUE_LOG_RETENTION_DAYS="$LOG_RETENTION_DAYS" \
+    LOCAL_ROGUE_LOG_SESSION="$LOG_SESSION" \
+    "$ACTIVITY_LOGGER" <"$LOG_FIFO" &
   LOG_READER_PID=$!
   if [[ "$FIRST_LOG" == 1 ]]; then
     docker logs --follow "$CONTAINER" >"$LOG_FIFO" 2>&1 &

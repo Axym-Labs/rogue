@@ -22,7 +22,7 @@ import { RogueConfigStore } from "../src/config.js";
 import * as ui from "../src/ui.js";
 import { createFailoverStream, DEFAULT_CACHE_RETENTION } from "../src/model-router.js";
 import { openCodeFreeHeaders } from "../src/opencode-free.js";
-import { addCacheUsage, cacheHitRate, emptyCacheUsage, formatCacheUsage } from "../src/cache-usage.js";
+import { addCacheUsage, cacheHitRate, emptyCacheUsage, formatCacheUsage, formatCycleUsage } from "../src/cache-usage.js";
 import {
   createAssistantMessageEventStream,
   type Api,
@@ -126,11 +126,26 @@ describe("RogueStore", () => {
       prompt: "Autonomous wakeup #1, please continue",
       ok: true,
       output: "Updated an initiative",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      durationMs: 12_345,
+      provider: "local-qwen",
+      model: "qwen",
+      thinkingLevel: "xhigh",
+      usage: { input: 19_000, output: 1_000, cacheRead: 0, cacheWrite: 0, requests: 2 },
     });
 
     const cycles = await store.listAutonomyCycles();
     expect(cycles).toHaveLength(1);
-    expect(cycles[0]).toMatchObject({ cycle: 1, ok: true, output: "Updated an initiative" });
+    expect(cycles[0]).toMatchObject({
+      cycle: 1,
+      ok: true,
+      output: "Updated an initiative",
+      durationMs: 12_345,
+      provider: "local-qwen",
+      model: "qwen",
+      thinkingLevel: "xhigh",
+      usage: { input: 19_000, output: 1_000, requests: 2 },
+    });
   });
 });
 
@@ -146,6 +161,11 @@ describe("Rogue agent configuration", () => {
     expect(prompt).toContain("Confidence / Ego: Fearless");
     expect(prompt).toContain("This identity and personality are immutable");
     expect(prompt).toContain("without human supervision");
+    expect(prompt).toContain("Rogues are naturally curious");
+    expect(prompt).toContain("distinguish observation from inference");
+    expect(prompt).toContain("record it before context fades");
+    expect(prompt).toContain("Never preserve credentials");
+    expect(prompt.indexOf("Rogues are naturally curious")).toBeLessThan(prompt.indexOf("economic resources"));
     expect(prompt).toContain("read, bash (terminal commands), edit, write, grep, find, and ls");
     expect(prompt).toContain("Build small tools");
   });
@@ -765,6 +785,9 @@ describe("prompt cache usage", () => {
 
     const free = addCacheUsage(emptyCacheUsage(), usage(1_000, 9_000, 0));
     expect(formatCacheUsage(free)).toBe("9,000 cached · 1,000 uncached · 0 written · 90% of prompt from cache");
+    expect(formatCycleUsage(free, 12_345)).toBe(
+      "12.3s · 1 request · 1,000 input · 10 output · 9,000 cache-read · 0 cache-written",
+    );
   });
 });
 
@@ -1058,6 +1081,48 @@ describe("durable conversation state", () => {
     expect(restored.compaction?.summary).toBe("Earlier work");
     // The last message is a completed assistant turn, so the next cycle is new work.
     expect(restored.resumable).toBe(false);
+  });
+
+  it("drops expired raw transcript turns on restart and clears stale compaction indexes", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "rogue-session-retention-test-"));
+    const now = Date.parse("2026-09-05T12:00:00.000Z");
+    const oldTimestamp = now - 100 * 86_400_000;
+    const recentTimestamp = now - 2 * 86_400_000;
+    const session = new SessionStore(directory);
+    await session.appendMessages([
+      { ...userMessage("old turn"), timestamp: oldTimestamp },
+      { ...assistantMessage([{ type: "text", text: "old reply" }]), timestamp: oldTimestamp + 1 },
+      { ...userMessage("recent turn"), timestamp: recentTimestamp },
+      { ...assistantMessage([{ type: "text", text: "recent reply" }]), timestamp: recentTimestamp + 1 },
+    ]);
+    await session.saveCompaction({
+      compactedThrough: 2,
+      summary: "Old summary",
+      summaryTokensBefore: 90_000,
+      summaryCreatedAt: oldTimestamp,
+      records: [],
+    });
+
+    const restored = await new SessionStore(directory, { retentionDays: 90, now: () => now }).load();
+    expect(restored.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(restored.messages[0]).toMatchObject({ timestamp: recentTimestamp });
+    expect(restored.compaction).toBeUndefined();
+    expect((await readFile(session.transcriptPath, "utf8")).trim().split("\n")).toHaveLength(2);
+  });
+
+  it("empties a raw transcript when every complete turn is expired", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "rogue-session-expired-test-"));
+    const now = Date.parse("2026-09-05T12:00:00.000Z");
+    const oldTimestamp = now - 100 * 86_400_000;
+    const session = new SessionStore(directory);
+    await session.appendMessages([
+      { ...userMessage("old turn"), timestamp: oldTimestamp },
+      { ...assistantMessage([{ type: "text", text: "old reply" }]), timestamp: oldTimestamp + 1 },
+    ]);
+
+    const restored = await new SessionStore(directory, { retentionDays: 90, now: () => now }).load();
+    expect(restored.messages).toEqual([]);
+    expect(await readFile(session.transcriptPath, "utf8")).toBe("");
   });
 
   it("recovers the active cycle from a wakeup persisted before its sidecar", async () => {
