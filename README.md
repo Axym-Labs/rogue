@@ -27,7 +27,10 @@ Qwen.
 
 The terminal shows at most 1,200 characters of reasoning per turn plus bounded,
 sanitized tool arguments and results. Rogue's existing read-only transcript
-viewer remains the complete detailed record.
+viewer remains the complete detailed record. The same terminal activity is
+appended to private daily files at
+`~/.local/state/local-rogue/logs/YYYY-MM-DD.log`. This directory is outside the
+workspace mount and is not visible to Rogue.
 
 ## Keeping up with the Agents
 

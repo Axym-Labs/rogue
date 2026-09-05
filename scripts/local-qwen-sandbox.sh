@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPOSITORY="$(dirname "$SCRIPT_DIR")"
+ACTIVITY_LOGGER="$SCRIPT_DIR/append-daily-log.sh"
 LOCAL_LLM_ROOT="${LOCAL_LLM_ROOT:-/home/davwis/main/harness/local-llm}"
 LOCAL_LLM_START="${LOCAL_LLM_START:-$LOCAL_LLM_ROOT/scripts/start-local-llm-ninfer.sh}"
 MODEL="${ROGUE_LOCAL_MODEL:-claude-opus-4-6[1m]}"
@@ -12,6 +13,7 @@ CONTEXT_WINDOW="${ROGUE_LOCAL_CONTEXT:-229376}"
 IMAGE="${ROGUE_LOCAL_IMAGE:-axym/rogue-local-qwen:latest}"
 WORKSPACE_ROOT="${LOCAL_ROGUE_WORKSPACE_ROOT:-/home/davwis/main/workspace}"
 WRITABLE_DIR="${LOCAL_ROGUE_WORKDIR:-$WORKSPACE_ROOT/rogue-workdir}"
+ACTIVITY_LOG_DIR="${LOCAL_ROGUE_LOG_DIR:-/home/davwis/.local/state/local-rogue/logs}"
 DRY_RUN=0
 ROGUE_ARGS=()
 
@@ -67,6 +69,15 @@ WRITABLE_DIR="$(realpath "$WRITABLE_DIR")"
 WRITABLE_RELATIVE="${WRITABLE_DIR#"$WORKSPACE_ROOT"/}"
 CONTAINER_WRITABLE_DIR="/workspace/$WRITABLE_RELATIVE"
 
+ACTIVITY_LOG_DIR="$(realpath -m "$ACTIVITY_LOG_DIR")"
+case "$ACTIVITY_LOG_DIR" in
+  "$WORKSPACE_ROOT"|"$WORKSPACE_ROOT"/*)
+    printf 'ERROR: activity logs must be outside the exposed workspace: %s\n' "$ACTIVITY_LOG_DIR" >&2
+    exit 2
+    ;;
+esac
+[[ -x "$ACTIVITY_LOGGER" ]] || { printf 'ERROR: activity logger not found: %s\n' "$ACTIVITY_LOGGER" >&2; exit 1; }
+
 # File names only: values are deliberately never opened. The workspace bind is
 # the complete read-only host view; these nested empty-file mounts hide common
 # secrets in both the read-only tree and the nested writable directory.
@@ -91,6 +102,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
     --arg workspace "$WORKSPACE_ROOT" \
     --arg workdir "$WRITABLE_DIR" \
     --arg containerWorkdir "$CONTAINER_WRITABLE_DIR" \
+    --arg activityLogDir "$ACTIVITY_LOG_DIR" \
     --arg repository "$REPOSITORY" \
     --arg model "$MODEL" \
     --argjson context "$CONTEXT_WINDOW" \
@@ -107,6 +119,11 @@ if [[ "$DRY_RUN" == 1 ]]; then
         {source: $workspace, target: "/workspace", mode: "ro"},
         {source: $workdir, target: $containerWorkdir, mode: "rw"}
       ],
+      activityLogs: {
+        directory: $activityLogDir,
+        rolling: "daily",
+        accessibleToAgent: false
+      },
       maskedCredentials: $masked,
       security: {
         readOnlyRoot: true,
@@ -123,6 +140,8 @@ fi
 command -v docker >/dev/null || { printf '%s\n' 'ERROR: Docker is required' >&2; exit 1; }
 command -v curl >/dev/null || { printf '%s\n' 'ERROR: curl is required' >&2; exit 1; }
 [[ -x "$LOCAL_LLM_START" ]] || { printf 'ERROR: local Qwen launcher not found: %s\n' "$LOCAL_LLM_START" >&2; exit 1; }
+mkdir -p "$ACTIVITY_LOG_DIR"
+chmod 0700 "$ACTIVITY_LOG_DIR"
 
 REVISION="$(git -C "$REPOSITORY" rev-parse HEAD)"
 BUILT_REVISION="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>/dev/null || true)"
@@ -244,10 +263,12 @@ while docker inspect "$CONTAINER" >/dev/null 2>&1; do
     docker start "$CONTAINER" >/dev/null 2>&1 || true
   fi
   if [[ "$FIRST_LOG" == 1 ]]; then
-    docker logs --follow "$CONTAINER" || true
+    docker logs --follow "$CONTAINER" 2>&1 |
+      LOCAL_ROGUE_LOG_DIR="$ACTIVITY_LOG_DIR" "$ACTIVITY_LOGGER" || true
     FIRST_LOG=0
   else
-    docker logs --tail 20 --follow "$CONTAINER" || true
+    docker logs --tail 20 --follow "$CONTAINER" 2>&1 |
+      LOCAL_ROGUE_LOG_DIR="$ACTIVITY_LOG_DIR" "$ACTIVITY_LOGGER" || true
   fi
   sleep 1
 done
