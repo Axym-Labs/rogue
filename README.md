@@ -21,7 +21,14 @@ Docker exposes the complete `/home/davwis/main/workspace` tree read-only. Only
 working directory. Its private state uses a separate Docker volume. The root
 filesystem is read-only; Rogue is non-root and receives no Linux capabilities,
 host namespaces, Docker socket, host home, Internet route, or
-credential-shaped files found anywhere in the workspace. Run
+credential-shaped files found anywhere in the workspace. VCS metadata, agent
+state, and credential-store directories are hidden wholesale. Before launch,
+Gitleaks 8.30.1 scans the remaining readable files inside a network- and
+filesystem-isolated Bubblewrap process; every finding is replaced by an
+unreadable empty mount. Startup fails closed on scanner errors or exposed IPC
+and device nodes. The NInfer container is likewise non-root, capability-free,
+read-only, on private namespaces and the internal-only network, with no host
+port. Run
 `local-rogue --dry-run` to inspect that boundary without starting Docker or
 Qwen.
 
@@ -30,7 +37,8 @@ sanitized tool arguments and results. Rogue's existing read-only transcript
 viewer remains the complete detailed record. The same terminal activity is
 appended to private daily files at
 `~/.local/state/local-rogue/logs/YYYY-MM-DD.log`. This directory is outside the
-workspace mount and is not visible to Rogue.
+workspace mount and is not visible to Rogue. `Ctrl-C` removes both containers
+and the private network in one pass.
 
 ## Keeping up with the Agents
 

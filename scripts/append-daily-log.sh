@@ -8,6 +8,9 @@ mkdir -p "$LOG_DIR"
 chmod 0700 "$LOG_DIR"
 
 while IFS= read -r line || [[ -n "$line" ]]; do
+  # Strip every C0 control except horizontal tab. This neutralizes terminal
+  # escape/OSC sequences and carriage-return rewriting before either sink.
+  line="$(printf '%s' "$line" | LC_ALL=C tr -d '\000-\010\013-\037\177')"
   log_file="$LOG_DIR/$(date +%F).log"
   if [[ ! -e "$log_file" ]]; then
     : >"$log_file"

@@ -12,12 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       jq \
       less \
-      openssh-client \
       procps \
       python3 \
       ripgrep \
       unzip \
-      wget \
  && rm -rf /var/lib/apt/lists/*
 
 # The stock node image already owns 1000; replacing it keeps the agent's UID

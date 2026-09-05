@@ -34,4 +34,22 @@ describe("daily activity log", () => {
     expect((await stat(logDir)).mode & 0o777).toBe(0o700);
     expect((await stat(path.join(logDir, `${day}.log`))).mode & 0o777).toBe(0o600);
   });
+
+  it("removes terminal control characters before display or persistence", async () => {
+    const logDir = await mkdtemp(path.join(tmpdir(), "rogue-logs-"));
+    const env = { ...process.env, LOCAL_ROGUE_LOG_DIR: logDir };
+    const { stdout: dayOutput } = await execFileAsync("date", ["+%F"]);
+    const day = dayOutput.trim();
+
+    const result = await execFileAsync(
+      "bash",
+      ["-c", 'printf "safe\\033]52;c;stolen\\a\\nnext\\rline\\n" | "$1"', "bash", logger],
+      { env },
+    );
+
+    expect(result.stdout).toBe("safe]52;c;stolen\nnextline\n");
+    expect(await readFile(path.join(logDir, `${day}.log`), "utf8")).toBe(
+      "safe]52;c;stolen\nnextline\n",
+    );
+  });
 });

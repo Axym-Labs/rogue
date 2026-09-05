@@ -1,0 +1,11 @@
+title = "Local Rogue preflight secret scan"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Skip dependencies, generated caches, and non-text model/data artifacts"
+paths = [
+  '''(^|/)(\.git|\.hg|\.svn|\.venv[^/]*|venv|node_modules|__pycache__|\.cache)(/|$)''',
+  '''(?i)\.(a|avi|bin|bmp|bz2|ckpt|class|dll|dylib|egg|exe|feather|gif|gz|h5|hdf5|ico|jar|jpeg|jpg|lock|mkv|mov|mp3|mp4|npy|npz|o|onnx|parquet|pdf|pickle|pkl|png|pt|pth|pyc|safetensors|so|tar|tiff|webm|whl|xz|zip|zst)$'''
+]
