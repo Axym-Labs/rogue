@@ -13,6 +13,8 @@ LOCAL_LLM_START="${LOCAL_LLM_START:-$LOCAL_LLM_ROOT/scripts/start-local-llm-ninf
 MODEL="${ROGUE_LOCAL_MODEL:-claude-opus-4-6[1m]}"
 CONTEXT_WINDOW="${ROGUE_LOCAL_CONTEXT:-229376}"
 IMAGE="${ROGUE_LOCAL_IMAGE:-axym/rogue-local-qwen:latest}"
+VPN_IMAGE="${LOCAL_ROGUE_VPN_IMAGE:-qmcgaw/gluetun@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027}"
+VPN_CONFIG="${LOCAL_ROGUE_VPN_CONFIG:-/home/davwis/.config/local-rogue/wg0.conf}"
 WORKSPACE_ROOT="${LOCAL_ROGUE_WORKSPACE_ROOT:-/home/davwis/main/workspace}"
 WRITABLE_DIR="${LOCAL_ROGUE_WORKDIR:-$WORKSPACE_ROOT/rogue-workdir}"
 ACTIVITY_LOG_DIR="${LOCAL_ROGUE_LOG_DIR:-/home/davwis/.local/state/local-rogue/logs}"
@@ -27,6 +29,7 @@ usage() {
     '' \
     'The complete ~/main/workspace tree is visible read-only. Only' \
     '~/main/workspace/rogue-workdir is writable.' \
+    'Internet access is available only through the isolated VPN gateway.' \
     '' \
     'The default Rogue mode is continuous autonomy. The local Qwen server and' \
     'sandbox live only while this wrapper is running; Ctrl-C closes both.'
@@ -242,6 +245,8 @@ if [[ "$DRY_RUN" == 1 ]]; then
     --arg workdir "$WRITABLE_DIR" \
     --arg containerWorkdir "$CONTAINER_WRITABLE_DIR" \
     --arg activityLogDir "$ACTIVITY_LOG_DIR" \
+    --arg vpnImage "$VPN_IMAGE" \
+    --arg vpnConfig "$VPN_CONFIG" \
     --arg permissionsNote "$PERMISSIONS_NOTE" \
     --arg repository "$REPOSITORY" \
     --arg model "$MODEL" \
@@ -259,7 +264,15 @@ if [[ "$DRY_RUN" == 1 ]]; then
       model: $model,
       contextWindow: $context,
       reasoning: "xhigh",
-      network: "internal",
+      network: "vpn-only",
+      vpnGateway: {
+        image: $vpnImage,
+        config: $vpnConfig,
+        proxy: "http://vpn-gateway:8888",
+        killSwitch: true,
+        credentialsExposedToAgent: false,
+        directInternet: false
+      },
       mounts: [
         {source: $workspace, target: "/workspace", mode: "ro"},
         {source: $workdir, target: $containerWorkdir, mode: "rw"}
@@ -300,7 +313,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
         noNewPrivileges: true,
         dockerSocket: false,
         hostNamespaces: false,
-        internet: false,
+        internet: "vpn-only",
         recursiveSubmounts: false,
         apparmor: "docker-default",
         seccomp: "builtin",
@@ -314,6 +327,37 @@ fi
 
 command -v docker >/dev/null || { printf '%s\n' 'ERROR: Docker is required' >&2; exit 1; }
 [[ -x "$LOCAL_LLM_START" ]] || { printf 'ERROR: local Qwen launcher not found: %s\n' "$LOCAL_LLM_START" >&2; exit 1; }
+[[ -f "$VPN_CONFIG" ]] || {
+  printf 'ERROR: VPN WireGuard config not found: %s\n' "$VPN_CONFIG" >&2
+  printf '%s\n' 'Download a WireGuard config (a free Proton VPN account works) and save it there with mode 0600.' >&2
+  exit 1
+}
+VPN_CONFIG="$(realpath "$VPN_CONFIG")"
+case "$VPN_CONFIG" in
+  "$WORKSPACE_ROOT"|"$WORKSPACE_ROOT"/*)
+    printf 'ERROR: VPN config must be outside the agent-visible workspace: %s\n' "$VPN_CONFIG" >&2
+    exit 2
+    ;;
+esac
+VPN_CONFIG_MODE="$(stat -c '%a' "$VPN_CONFIG")"
+VPN_CONFIG_OWNER="$(stat -c '%u' "$VPN_CONFIG")"
+if (( (0$VPN_CONFIG_MODE & 077) != 0 )) || [[ "$VPN_CONFIG_OWNER" != "$(id -u)" ]]; then
+  printf 'ERROR: VPN config must be owned by UID %s and unreadable by group/others (mode 0600): %s\n' "$(id -u)" "$VPN_CONFIG" >&2
+  exit 2
+fi
+grep -Eq '^\[Interface\][[:space:]]*$' "$VPN_CONFIG" \
+  && grep -Eq '^[[:space:]]*PrivateKey[[:space:]]*=' "$VPN_CONFIG" \
+  && grep -Eq '^\[Peer\][[:space:]]*$' "$VPN_CONFIG" \
+  && grep -Eq '^[[:space:]]*PublicKey[[:space:]]*=' "$VPN_CONFIG" \
+  && grep -Eq '^[[:space:]]*Endpoint[[:space:]]*=' "$VPN_CONFIG" \
+  && grep -Eq '^[[:space:]]*AllowedIPs[[:space:]]*=.*0\.0\.0\.0/0' "$VPN_CONFIG" || {
+  printf 'ERROR: VPN config is not a complete full-tunnel WireGuard client configuration: %s\n' "$VPN_CONFIG" >&2
+  exit 2
+}
+if grep -Eq '^[[:space:]]*(PreUp|PostUp|PreDown|PostDown)[[:space:]]*=' "$VPN_CONFIG"; then
+  printf 'ERROR: refusing executable hooks in VPN config: %s\n' "$VPN_CONFIG" >&2
+  exit 2
+fi
 mkdir -p "$ACTIVITY_LOG_DIR"
 chmod 0700 "$ACTIVITY_LOG_DIR"
 
@@ -341,10 +385,14 @@ fi
 TOKEN="$(printf '%s' "$WORKSPACE_ROOT" | sha256sum | cut -c1-12)"
 LOG_SESSION="$TOKEN-$$"
 NETWORK="axym-rogue-$TOKEN-$$"
+EGRESS_NETWORK="axym-rogue-vpn-egress-$TOKEN-$$"
 CONTAINER="axym-rogue-$TOKEN-$$"
+VPN_CONTAINER="axym-rogue-vpn-$TOKEN-$$"
+VPN_STATE_VOLUME="axym-rogue-vpn-state-$TOKEN-$$"
 STATE_VOLUME="axym-rogue-state-$TOKEN"
 MODEL_CONTAINER="${LOCAL_LLM_CONTAINER_NAME:-${NINFER_CONTAINER_NAME:-local-llm}}"
 MODEL_STARTED=0
+VPN_STARTED=0
 BOOTSTRAP="$RUNTIME_DIR/initial_auth.json"
 MODEL_LOG="$RUNTIME_DIR/model.log"
 LOG_FIFO="$RUNTIME_DIR/activity.pipe"
@@ -352,6 +400,9 @@ DOCKER_LOG_PID=0
 LOG_READER_PID=0
 SESSION_LOGGED=0
 mkfifo "$LOG_FIFO"
+VPN_RESOLV="$RUNTIME_DIR/vpn-resolv.conf"
+touch "$VPN_RESOLV"
+chmod 0666 "$VPN_RESOLV"
 
 log_metadata() {
   printf '%s\n' "$1" | \
@@ -380,7 +431,13 @@ cleanup() {
   if [[ "$MODEL_STARTED" == 1 ]]; then
     docker stop --time 10 "$MODEL_CONTAINER" >/dev/null 2>&1 || true
   fi
+  if [[ "$VPN_STARTED" == 1 ]]; then
+    docker stop --time 5 "$VPN_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  docker rm -f "$VPN_CONTAINER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  docker network rm "$EGRESS_NETWORK" >/dev/null 2>&1 || true
+  docker volume rm "$VPN_STATE_VOLUME" >/dev/null 2>&1 || true
   chmod 0700 "$MASK_DIRECTORY" 2>/dev/null || true
   find "$RUNTIME_DIR" -depth -delete 2>/dev/null || true
 }
@@ -395,12 +452,89 @@ mapfile -t STALE_ROGUES < <(docker ps -aq --filter status=exited --filter label=
 if ((${#STALE_ROGUES[@]})); then
   docker rm "${STALE_ROGUES[@]}" >/dev/null
 fi
+mapfile -t STALE_VPNS < <(docker ps -aq --filter label=com.axym.local-rogue-vpn=true)
+if ((${#STALE_VPNS[@]})); then
+  docker rm -f "${STALE_VPNS[@]}" >/dev/null
+fi
+mapfile -t STALE_VPN_VOLUMES < <(docker volume ls -q --filter label=com.axym.local-rogue-vpn=true)
+if ((${#STALE_VPN_VOLUMES[@]})); then
+  docker volume rm "${STALE_VPN_VOLUMES[@]}" >/dev/null 2>&1 || true
+fi
 
 if docker inspect "$MODEL_CONTAINER" >/dev/null 2>&1; then
   printf '%s\n' 'ERROR: refusing to reuse an existing local model container; stop it before starting local-rogue' >&2
   exit 1
 fi
 docker network create --internal "$NETWORK" >/dev/null
+docker network create "$EGRESS_NETWORK" >/dev/null
+docker volume create --label com.axym.local-rogue-vpn=true "$VPN_STATE_VOLUME" >/dev/null
+# Copy the user-owned 0600 credential into a root-owned ephemeral volume. This
+# short-lived initializer has no network and only read-search privilege; the
+# long-running gateway receives neither that privilege nor the host path.
+docker run --rm \
+  --network none \
+  --read-only \
+  --cap-drop ALL \
+  --cap-add DAC_READ_SEARCH \
+  --security-opt no-new-privileges:true \
+  --pids-limit 16 \
+  --memory 64m \
+  --memory-swap 64m \
+  --mount "type=volume,src=$VPN_STATE_VOLUME,dst=/gluetun,volume-nocopy" \
+  --mount "type=bind,src=$VPN_CONFIG,dst=/run/wg0.conf,readonly" \
+  --entrypoint /bin/sh \
+  "$VPN_IMAGE" \
+  -c 'install -d -m 700 /gluetun/wireguard && install -m 400 /run/wg0.conf /gluetun/wireguard/wg0.conf'
+docker create \
+  --name "$VPN_CONTAINER" \
+  --hostname vpn-gateway \
+  --label com.axym.local-rogue-vpn=true \
+  --restart no \
+  --network "$EGRESS_NETWORK" \
+  --read-only \
+  --cap-drop ALL \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun:/dev/net/tun \
+  --security-opt no-new-privileges:true \
+  --security-opt apparmor=docker-default \
+  --security-opt seccomp=builtin \
+  --cgroupns private \
+  --ipc private \
+  --pids-limit 128 \
+  --memory 512m \
+  --memory-swap 512m \
+  --cpus 2 \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m \
+  --mount "type=volume,src=$VPN_STATE_VOLUME,dst=/gluetun,volume-nocopy" \
+  --mount "type=bind,src=$VPN_RESOLV,dst=/etc/resolv.conf" \
+  --env PUID=0 \
+  --env PGID=0 \
+  --env VPN_SERVICE_PROVIDER=custom \
+  --env VPN_TYPE=wireguard \
+  --env HTTPPROXY=on \
+  --env HTTPPROXY_LOG=off \
+  --env HTTPPROXY_LISTENING_ADDRESS=:8888 \
+  --env FIREWALL_INPUT_PORTS=8888 \
+  --env PUBLICIP_ENABLED=off \
+  --env VERSION_INFORMATION=off \
+  --env TZ=UTC \
+  "$VPN_IMAGE" >/dev/null
+docker network connect --alias vpn-gateway "$NETWORK" "$VPN_CONTAINER"
+docker start "$VPN_CONTAINER" >/dev/null
+VPN_STARTED=1
+
+printf '%s\n' 'Waiting for the VPN kill-switch gateway…' >&2
+for _ in $(seq 1 90); do
+  VPN_HEALTH="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$VPN_CONTAINER" 2>/dev/null || true)"
+  [[ "$VPN_HEALTH" == healthy ]] && break
+  [[ "$VPN_HEALTH" == unhealthy || "$VPN_HEALTH" == exited || "$VPN_HEALTH" == dead ]] && break
+  sleep 1
+done
+[[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$VPN_CONTAINER" 2>/dev/null || true)" == healthy ]] || {
+  printf '%s\n' 'ERROR: VPN gateway did not become healthy; refusing to start Qwen or Rogue.' >&2
+  exit 1
+}
+
 LOCAL_LLM_DETACH=1 \
   LOCAL_LLM_DOCKER_NETWORK="$NETWORK" \
   LOCAL_LLM_NETWORK_ALIAS=local-llm \
@@ -436,6 +570,7 @@ jq -n \
       models: [{id: $model, name: "Qwen3.8 27B NVFP4", reasoning: true, contextWindow: $context, maxTokens: 32768}]
     }],
     providers: [{provider: "local-qwen", model: $model, priority: 0}],
+    httpProxy: {url: "http://vpn-gateway:8888", noProxy: "local-llm,localhost,127.0.0.1"},
     relays: []
   }' >"$BOOTSTRAP"
 chmod 0600 "$BOOTSTRAP"
@@ -472,6 +607,13 @@ DOCKER_ARGS=(
   --env ROGUE_INITIAL_AUTH_FILE=/run/rogue/initial_auth.json
   --env ROGUE_THINKING=xhigh
   --env ROGUE_CACHE_RETENTION=none
+  --env ROGUE_REPROVISION=1
+  --env HTTP_PROXY=http://vpn-gateway:8888
+  --env HTTPS_PROXY=http://vpn-gateway:8888
+  --env http_proxy=http://vpn-gateway:8888
+  --env https_proxy=http://vpn-gateway:8888
+  --env NO_PROXY=local-llm,localhost,127.0.0.1
+  --env no_proxy=local-llm,localhost,127.0.0.1
   --env "ROGUE_SESSION_RETENTION_DAYS=$SESSION_RETENTION_DAYS"
   --env 'ROGUE_EXTRA_ARGS=--no-failover'
   --mount "type=bind,src=$WORKSPACE_ROOT,dst=/workspace,readonly,bind-recursive=disabled"
@@ -497,12 +639,16 @@ done
 DOCKER_ARGS+=("$IMAGE" "${ROGUE_ARGS[@]}")
 
 docker "${DOCKER_ARGS[@]}" >/dev/null
-log_metadata "event=session_start model=$MODEL context=$CONTEXT_WINDOW rogue_revision=$REVISION"
+log_metadata "event=session_start model=$MODEL context=$CONTEXT_WINDOW reasoning=xhigh egress=vpn rogue_revision=$REVISION"
 SESSION_LOGGED=1
 printf 'Rogue can read %s and write only %s; %d credential file(s) are hidden. Ctrl-C stops Rogue and Qwen.\n' \
   "$WORKSPACE_ROOT" "$WRITABLE_DIR" "${#MASKED_CREDENTIALS[@]}" >&2
 FIRST_LOG=1
 while docker inspect "$CONTAINER" >/dev/null 2>&1; do
+  if [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$VPN_CONTAINER" 2>/dev/null || true)" != healthy ]]; then
+    printf '%s\n' 'ERROR: VPN gateway lost health; stopping the contained session.' >&2
+    break
+  fi
   if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" != true ]]; then
     # A model-issued exit cannot end the supervised service. An explicit user
     # Ctrl-C/HUP reaches the wrapper trap instead and removes the container.

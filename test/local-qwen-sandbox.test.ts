@@ -84,14 +84,22 @@ describe("local Qwen Docker boundary", () => {
     expect(plan.model).toBe("claude-opus-4-6[1m]");
     expect(plan.contextWindow).toBe(229376);
     expect(plan.reasoning).toBe("xhigh");
-    expect(plan.network).toBe("internal");
+    expect(plan.network).toBe("vpn-only");
+    expect(plan.vpnGateway).toMatchObject({
+      image: "qmcgaw/gluetun@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027",
+      config: "/home/davwis/.config/local-rogue/wg0.conf",
+      proxy: "http://vpn-gateway:8888",
+      killSwitch: true,
+      credentialsExposedToAgent: false,
+      directInternet: false,
+    });
     expect(plan.security).toMatchObject({
       readOnlyRoot: true,
       capabilities: [],
       noNewPrivileges: true,
       dockerSocket: false,
       hostNamespaces: false,
-      internet: false,
+      internet: "vpn-only",
       recursiveSubmounts: false,
       apparmor: "docker-default",
       seccomp: "builtin",
@@ -205,7 +213,7 @@ describe("local Qwen Docker boundary", () => {
   it("starts a dedicated model directly on the internal network", async () => {
     const source = await readFile(script, "utf8");
     expect(source).toContain('LOCAL_LLM_DOCKER_NETWORK="$NETWORK"');
-    expect(source).not.toContain("docker network connect");
+    expect(source).toContain('docker network connect --alias vpn-gateway "$NETWORK" "$VPN_CONTAINER"');
     expect(source.indexOf('docker network create --internal "$NETWORK"')).toBeLessThan(
       source.indexOf('LOCAL_LLM_DOCKER_NETWORK="$NETWORK"'),
     );
@@ -215,5 +223,18 @@ describe("local Qwen Docker boundary", () => {
     expect(source).toContain('src=$MASK_FILE,dst=/workspace/$relative,readonly');
     expect(source).not.toContain("src=/dev/null,dst=/workspace/$relative");
     expect(source).toContain("--security-opt seccomp=builtin");
+    expect(source).toContain('VPN_STATE_VOLUME="axym-rogue-vpn-state-$TOKEN-$$"');
+    expect(source).toContain('src=$VPN_STATE_VOLUME,dst=/gluetun,volume-nocopy');
+    expect(source).toContain('src=$VPN_RESOLV,dst=/etc/resolv.conf');
+    expect(source).toContain('--cap-add DAC_READ_SEARCH');
+    expect(source).toContain('--env PUID=0');
+    expect(source).toContain('--env PUBLICIP_ENABLED=off');
+    expect(source).toContain('--env VERSION_INFORMATION=off');
+    expect(source).toContain('--env HTTPS_PROXY=http://vpn-gateway:8888');
+    expect(source).toContain('--env ROGUE_REPROVISION=1');
+    expect(source).toContain('VPN_SERVICE_PROVIDER=custom');
+    expect(source).toContain('FIREWALL_INPUT_PORTS=8888');
+    expect(source).toContain("VPN gateway lost health");
+    expect(source).toContain("refusing executable hooks in VPN config");
   });
 });

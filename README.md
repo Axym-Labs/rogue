@@ -20,7 +20,7 @@ Docker exposes the complete `/home/davwis/main/workspace` tree read-only. Only
 `/home/davwis/main/workspace/rogue-workdir` is writable, and that is Rogue's
 working directory. Its private state uses a separate Docker volume. The root
 filesystem is read-only; Rogue is non-root and receives no Linux capabilities,
-host namespaces, Docker socket, host home, Internet route, or
+host namespaces, Docker socket, host home, direct Internet route, or
 credential-shaped files found anywhere in the workspace. VCS metadata, agent
 state, and credential-store directories are hidden wholesale. Before launch,
 Gitleaks 8.30.1 scans the remaining readable files inside a network- and
@@ -28,9 +28,19 @@ filesystem-isolated Bubblewrap process; every finding is replaced by an
 unreadable empty mount. Startup fails closed on scanner errors or exposed IPC
 and device nodes. The NInfer container is likewise non-root, capability-free,
 read-only, on private namespaces and the internal-only network, with no host
-port. Run
+port. Internet traffic is available only through a digest-pinned Gluetun
+WireGuard
+gateway and its kill-switched HTTP proxy. Rogue has no direct egress route; the
+gateway alone joins a second outbound Docker network, and the WireGuard config
+stays outside every agent-visible mount. Run
 `local-rogue --dry-run` to inspect that boundary without starting Docker or
 Qwen.
+
+Save a WireGuard client configuration at
+`~/.config/local-rogue/wg0.conf` with mode `0600`. Proton VPN's free plan is
+compatible and has no data cap. Startup fails before allocating GPU memory if
+the file is absent, exposed to group/other users, inside the visible workspace,
+or if the VPN gateway does not report healthy.
 
 An immutable `00-READ-ME-FIRST.md` is mounted at the top of the writable folder
 so every session sees a concise statement of its actual read, write, network,
@@ -48,7 +58,9 @@ recorded. Raw activity files and raw transcript turns are retained for 90 days
 and pruned on startup. Durable memories, initiatives, summaries, and project
 notes are not age-pruned. Override the windows with
 `LOCAL_ROGUE_LOG_RETENTION_DAYS` and `LOCAL_ROGUE_SESSION_RETENTION_DAYS`.
-`Ctrl-C` removes both containers and the private network in one pass.
+`Ctrl-C` removes the Rogue, model, VPN gateway, and both private networks in one
+pass. Loss of VPN health also stops the contained session; direct fallback is
+impossible.
 
 ## Keeping up with the Agents
 
