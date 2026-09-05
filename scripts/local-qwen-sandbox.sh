@@ -195,8 +195,6 @@ DOCKER_ARGS=(
   --env ROGUE_STATE_DIR=/state
   --env ROGUE_BOOTSTRAP=/state/initial_auth.json
   --env ROGUE_INITIAL_AUTH_FILE=/run/rogue/initial_auth.json
-  --env ROGUE_PROVIDER=local-qwen
-  --env "ROGUE_MODEL=$MODEL"
   --env ROGUE_THINKING=xhigh
   --env ROGUE_CACHE_RETENTION=none
   --env 'ROGUE_EXTRA_ARGS=--no-failover'
@@ -216,4 +214,18 @@ DOCKER_ARGS+=("$IMAGE" "${ROGUE_ARGS[@]}")
 docker "${DOCKER_ARGS[@]}" >/dev/null
 printf 'Rogue is contained in %s; %d credential file(s) are hidden. Ctrl-C stops Rogue and Qwen.\n' \
   "$PROJECT" "${#MASKED_CREDENTIALS[@]}" >&2
-docker logs --follow "$CONTAINER"
+FIRST_LOG=1
+while docker inspect "$CONTAINER" >/dev/null 2>&1; do
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" != true ]]; then
+    # A model-issued exit cannot end the supervised service. An explicit user
+    # Ctrl-C/HUP reaches the wrapper trap instead and removes the container.
+    docker start "$CONTAINER" >/dev/null 2>&1 || true
+  fi
+  if [[ "$FIRST_LOG" == 1 ]]; then
+    docker logs --follow "$CONTAINER" || true
+    FIRST_LOG=0
+  else
+    docker logs --tail 20 --follow "$CONTAINER" || true
+  fi
+  sleep 1
+done

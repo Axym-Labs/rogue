@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -50,5 +50,11 @@ describe("local Qwen Docker boundary", () => {
     await symlink(script, alias);
     const { stdout } = await execFileAsync("bash", [alias, "--dry-run", "--project", directory]);
     expect(JSON.parse(stdout)).toMatchObject({ project: directory, repository: repositoryRoot });
+  });
+
+  it("keeps supervising if the agent process exits itself", async () => {
+    const source = await readFile(script, "utf8");
+    expect(source).toContain('while docker inspect "$CONTAINER"');
+    expect(source).toContain('docker start "$CONTAINER"');
   });
 });
