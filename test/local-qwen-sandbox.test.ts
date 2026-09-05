@@ -14,6 +14,7 @@ describe("local Qwen Docker boundary", () => {
     const workspace = await mkdtemp(path.join(tmpdir(), "rogue-workspace-"));
     const currentProject = path.join(workspace, "project-a");
     const workdir = path.join(workspace, "rogue-workdir");
+    const logDir = await mkdtemp(path.join(tmpdir(), "rogue-private-logs-"));
     await mkdir(currentProject);
     await mkdir(workdir);
 
@@ -23,6 +24,7 @@ describe("local Qwen Docker boundary", () => {
         ...process.env,
         LOCAL_ROGUE_WORKSPACE_ROOT: workspace,
         LOCAL_ROGUE_WORKDIR: workdir,
+        LOCAL_ROGUE_LOG_DIR: logDir,
       },
     });
     const plan = JSON.parse(stdout);
@@ -33,6 +35,12 @@ describe("local Qwen Docker boundary", () => {
       { source: workspace, target: "/workspace", mode: "ro" },
       { source: workdir, target: "/workspace/rogue-workdir", mode: "rw" },
     ]);
+    expect(plan.activityLogs).toEqual({
+      directory: logDir,
+      rolling: "daily",
+      accessibleToAgent: false,
+    });
+    expect(plan.mounts.every((mount: { source: string }) => mount.source !== logDir)).toBe(true);
   });
 
   it("describes a read-only workspace, isolated writable folder, and credential masks", async () => {
