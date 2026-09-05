@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
-const script = path.resolve("scripts/local-qwen-sandbox.sh");
+const repositoryRoot = path.resolve(".");
+const script = path.join(repositoryRoot, "scripts/local-qwen-sandbox.sh");
 
 describe("local Qwen Docker boundary", () => {
   it("describes a least-privilege project mount and credential masks", async () => {
@@ -41,5 +42,13 @@ describe("local Qwen Docker boundary", () => {
     await expect(execFileAsync("bash", [script, "--dry-run", "--project", "/"])).rejects.toMatchObject({
       stderr: expect.stringContaining("filesystem root"),
     });
+  });
+
+  it("resolves its repository when invoked through an alias symlink", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "rogue-alias-"));
+    const alias = path.join(directory, "local-rogue");
+    await symlink(script, alias);
+    const { stdout } = await execFileAsync("bash", [alias, "--dry-run", "--project", directory]);
+    expect(JSON.parse(stdout)).toMatchObject({ project: directory, repository: repositoryRoot });
   });
 });

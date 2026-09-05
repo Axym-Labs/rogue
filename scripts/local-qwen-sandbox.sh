@@ -2,7 +2,8 @@
 # Run Rogue against local Qwen inside a Docker-enforced project boundary.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 REPOSITORY="$(dirname "$SCRIPT_DIR")"
 LOCAL_LLM_ROOT="${LOCAL_LLM_ROOT:-/home/davwis/main/harness/local-llm}"
 LOCAL_LLM_START="${LOCAL_LLM_START:-$LOCAL_LLM_ROOT/scripts/start-local-llm-ninfer.sh}"
@@ -73,11 +74,13 @@ masked_json="$({ for item in "${MASKED_CREDENTIALS[@]}"; do printf '%s\0' "$item
 if [[ "$DRY_RUN" == 1 ]]; then
   jq -n \
     --arg project "$PROJECT" \
+    --arg repository "$REPOSITORY" \
     --arg model "$MODEL" \
     --argjson context "$CONTEXT_WINDOW" \
     --argjson masked "$masked_json" \
     '{
       project: $project,
+      repository: $repository,
       model: $model,
       contextWindow: $context,
       reasoning: "xhigh",
