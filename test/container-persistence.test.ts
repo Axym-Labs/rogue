@@ -13,4 +13,13 @@ describe("container persistence", () => {
     expect(compose).toMatch(/^\s{2}rogue-home:\s*$/m);
     expect(compose).toMatch(/^\s{2}rogue-agent:\s*$/m);
   });
+
+  it("supports a dedicated state mount outside the project workspace", async () => {
+    const entrypoint = await readFile(path.join(repositoryRoot, "docker", "entrypoint.sh"), "utf8");
+    const image = await readFile(path.join(repositoryRoot, "Dockerfile"), "utf8");
+
+    expect(entrypoint).toContain('STATE_DIR=${ROGUE_STATE_DIR:-$WORKSPACE/.rogue}');
+    expect(entrypoint).toContain('set -- --state-dir "$STATE_DIR" "$@"');
+    expect(image).toMatch(/install -d[^\n]*\/state/);
+  });
 });

@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Run Rogue against local Qwen inside a Docker-enforced project boundary.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY="$(dirname "$SCRIPT_DIR")"
+LOCAL_LLM_ROOT="${LOCAL_LLM_ROOT:-/home/davwis/main/harness/local-llm}"
+LOCAL_LLM_START="${LOCAL_LLM_START:-$LOCAL_LLM_ROOT/scripts/start-local-llm-ninfer.sh}"
+MODEL="${ROGUE_LOCAL_MODEL:-claude-opus-4-6[1m]}"
+CONTEXT_WINDOW="${ROGUE_LOCAL_CONTEXT:-229376}"
+IMAGE="${ROGUE_LOCAL_IMAGE:-axym/rogue-local-qwen:latest}"
+PROJECT="$(pwd -P)"
+DRY_RUN=0
+ROGUE_ARGS=()
+
+usage() {
+  printf '%s\n' \
+    'Usage: local-qwen-sandbox.sh [--project DIR] [--dry-run] [-- ROGUE_ARGS...]' \
+    '' \
+    'The default Rogue mode is continuous autonomy. The local Qwen server and' \
+    'sandbox live only while this wrapper is running; Ctrl-C closes both.'
+}
+
+while (($#)); do
+  case "$1" in
+    --project)
+      [[ $# -ge 2 ]] || { printf '%s\n' 'ERROR: --project requires a directory' >&2; exit 2; }
+      PROJECT="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      ROGUE_ARGS+=("$@")
+      break
+      ;;
+    *)
+      ROGUE_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+[[ -d "$PROJECT" ]] || { printf 'ERROR: project directory does not exist: %s\n' "$PROJECT" >&2; exit 2; }
+PROJECT="$(realpath "$PROJECT")"
+[[ "$PROJECT" != / ]] || { printf '%s\n' 'ERROR: refusing to expose the filesystem root as a project' >&2; exit 2; }
+
+# File names only: values are deliberately never opened. The project bind is
+# the complete host view; these nested empty-file mounts hide common secrets.
+mapfile -d '' MASKED_CREDENTIALS < <(
+  find "$PROJECT" -xdev -type f \
+    \( \
+      -name '.env' -o -name '.env.*' -o \
+      -name '*.pem' -o -name '*.key' -o \
+      -name 'id_rsa' -o -name 'id_ed25519' -o \
+      -name '.netrc' -o -name '.npmrc' -o -name '.pypirc' -o \
+      -name '.git-credentials' -o -name 'credentials.json' -o \
+      -name 'secrets.json' -o -name 'auth.json' -o \
+      -path '*/.rogue/config.json' \
+    \) \
+    ! -name '.env.example' ! -name '.env.sample' \
+    -printf '%P\0' | sort -z
+)
+
+masked_json="$({ for item in "${MASKED_CREDENTIALS[@]}"; do printf '%s\0' "$item"; done; } | jq -Rs 'split("\u0000")[:-1]')"
+if [[ "$DRY_RUN" == 1 ]]; then
+  jq -n \
+    --arg project "$PROJECT" \
+    --arg model "$MODEL" \
+    --argjson context "$CONTEXT_WINDOW" \
+    --argjson masked "$masked_json" \
+    '{
+      project: $project,
+      model: $model,
+      contextWindow: $context,
+      reasoning: "xhigh",
+      network: "internal",
+      mounts: [{source: $project, target: "/workspace", mode: "rw"}],
+      maskedCredentials: $masked,
+      security: {
+        readOnlyRoot: true,
+        capabilities: [],
+        noNewPrivileges: true,
+        dockerSocket: false,
+        hostNamespaces: false,
+        internet: false
+      }
+    }'
+  exit 0
+fi
+
+command -v docker >/dev/null || { printf '%s\n' 'ERROR: Docker is required' >&2; exit 1; }
+command -v curl >/dev/null || { printf '%s\n' 'ERROR: curl is required' >&2; exit 1; }
+[[ -x "$LOCAL_LLM_START" ]] || { printf 'ERROR: local Qwen launcher not found: %s\n' "$LOCAL_LLM_START" >&2; exit 1; }
+
+REVISION="$(git -C "$REPOSITORY" rev-parse HEAD)"
+BUILT_REVISION="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>/dev/null || true)"
+if [[ "$BUILT_REVISION" != "$REVISION" ]]; then
+  npm --prefix "$REPOSITORY" run build
+  docker build \
+    --build-arg "ROGUE_UID=$(id -u)" \
+    --build-arg "ROGUE_GID=$(id -g)" \
+    --build-arg "ROGUE_REVISION=$REVISION" \
+    --tag "$IMAGE" \
+    "$REPOSITORY"
+fi
+
+TOKEN="$(printf '%s' "$PROJECT" | sha256sum | cut -c1-12)"
+NETWORK="axym-rogue-$TOKEN-$$"
+CONTAINER="axym-rogue-$TOKEN-$$"
+STATE_VOLUME="axym-rogue-state-$TOKEN"
+MODEL_CONTAINER="${LOCAL_LLM_CONTAINER_NAME:-${NINFER_CONTAINER_NAME:-local-llm}}"
+MODEL_STARTED=0
+MODEL_CONNECTED=0
+BOOTSTRAP="$(mktemp)"
+
+cleanup() {
+  trap - EXIT INT TERM HUP
+  docker stop --time 5 "$CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  if [[ "$MODEL_CONNECTED" == 1 ]]; then
+    docker network disconnect "$NETWORK" "$MODEL_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  if [[ "$MODEL_STARTED" == 1 ]]; then
+    docker stop --time 10 "$MODEL_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  rm -f "$BOOTSTRAP"
+}
+trap cleanup EXIT INT TERM HUP
+
+if [[ "$(docker inspect -f '{{.State.Running}}' "$MODEL_CONTAINER" 2>/dev/null || true)" != true ]]; then
+  LOCAL_LLM_DETACH=1 "$LOCAL_LLM_START" >/tmp/axym-local-qwen.log 2>&1
+  MODEL_STARTED=1
+fi
+
+printf '%s\n' 'Waiting for local Qwen…' >&2
+for _ in $(seq 1 180); do
+  if curl --fail --silent --max-time 2 http://127.0.0.1:8000/v1/models >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+curl --fail --silent --max-time 5 http://127.0.0.1:8000/v1/models >/dev/null || {
+  printf '%s\n' 'ERROR: local Qwen did not become ready; see /tmp/axym-local-qwen.log' >&2
+  exit 1
+}
+
+docker network create --internal "$NETWORK" >/dev/null
+docker network connect --alias local-llm "$NETWORK" "$MODEL_CONTAINER"
+MODEL_CONNECTED=1
+
+jq -n \
+  --arg model "$MODEL" \
+  --argjson context "$CONTEXT_WINDOW" \
+  '{
+    customProviders: [{
+      id: "local-qwen",
+      name: "Local Qwen 27B",
+      baseUrl: "http://local-llm:8000",
+      api: "anthropic-messages",
+      contextWindow: $context,
+      maxTokens: 32768,
+      reasoning: true,
+      models: [{id: $model, name: "Qwen3.8 27B NVFP4", reasoning: true, contextWindow: $context, maxTokens: 32768}]
+    }],
+    providers: [{provider: "local-qwen", model: $model, priority: 0}],
+    relays: []
+  }' >"$BOOTSTRAP"
+chmod 0600 "$BOOTSTRAP"
+
+DOCKER_ARGS=(
+  run --detach
+  --name "$CONTAINER"
+  --restart unless-stopped
+  --network "$NETWORK"
+  --user "$(id -u):$(id -g)"
+  --read-only
+  --cap-drop ALL
+  --security-opt no-new-privileges:true
+  --pids-limit 256
+  --memory 8g
+  --cpus 8
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m
+  --env HOME=/tmp
+  --env ROGUE_WORKSPACE=/workspace
+  --env ROGUE_STATE_DIR=/state
+  --env ROGUE_BOOTSTRAP=/state/initial_auth.json
+  --env ROGUE_INITIAL_AUTH_FILE=/run/rogue/initial_auth.json
+  --env ROGUE_PROVIDER=local-qwen
+  --env "ROGUE_MODEL=$MODEL"
+  --env ROGUE_THINKING=xhigh
+  --env ROGUE_CACHE_RETENTION=none
+  --env 'ROGUE_EXTRA_ARGS=--no-failover'
+  --mount "type=bind,src=$PROJECT,dst=/workspace"
+  --mount "type=volume,src=$STATE_VOLUME,dst=/state"
+  --mount "type=bind,src=$BOOTSTRAP,dst=/run/rogue/initial_auth.json,readonly"
+)
+for relative in "${MASKED_CREDENTIALS[@]}"; do
+  [[ "$relative" != *$'\n'* && "$relative" != *,* ]] || {
+    printf 'ERROR: unsupported credential path: %q\n' "$relative" >&2
+    exit 1
+  }
+  DOCKER_ARGS+=(--mount "type=bind,src=/dev/null,dst=/workspace/$relative,readonly")
+done
+DOCKER_ARGS+=("$IMAGE" "${ROGUE_ARGS[@]}")
+
+docker "${DOCKER_ARGS[@]}" >/dev/null
+printf 'Rogue is contained in %s; %d credential file(s) are hidden. Ctrl-C stops Rogue and Qwen.\n' \
+  "$PROJECT" "${#MASKED_CREDENTIALS[@]}" >&2
+docker logs --follow "$CONTAINER"

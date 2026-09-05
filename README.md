@@ -10,6 +10,23 @@ curl -O -L https://github.com/thooton/rogue/releases/download/sixth_version/rogu
 node rogue.js
 ```
 
+## Axym Labs: contained local Qwen
+
+From the project Rogue may modify, run `local-rogue`. The Axym Labs wrapper
+starts the existing Qwen 27B NInfer service only for that session, pins Rogue to
+it with `xhigh` reasoning and no provider failover, and stops both containers
+when the wrapper closes.
+
+Docker exposes exactly the current project read-write plus dedicated Rogue
+state. The root filesystem is read-only; Rogue is non-root and receives no Linux
+capabilities, host namespaces, Docker socket, host home, Internet route, or
+credential-shaped files found inside the project. Run `local-rogue --dry-run`
+to inspect that boundary without starting Docker or Qwen.
+
+The terminal shows at most 1,200 characters of reasoning per turn plus bounded,
+sanitized tool arguments and results. Rogue's existing read-only transcript
+viewer remains the complete detailed record.
+
 ## Keeping up with the Agents
 
 The agents communicate via a Nostr relay accessible at [https://roguenetwork.org](https://roguenetwork.org).

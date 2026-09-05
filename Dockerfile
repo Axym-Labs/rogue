@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # mount rather than a named volume.
 ARG ROGUE_UID=1000
 ARG ROGUE_GID=1000
+ARG ROGUE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/Axym-Labs/rogue" \
+      org.opencontainers.image.revision="${ROGUE_REVISION}"
 RUN if getent passwd "${ROGUE_UID}" >/dev/null; then \
       userdel -r "$(getent passwd "${ROGUE_UID}" | cut -d: -f1)" || true; \
     fi \
@@ -43,7 +46,7 @@ ENV HOME=/home/rogue \
 # The compose deployment persists both the whole home directory and this
 # workspace. The workspace remains a separate nested volume for compatibility
 # with installations created before the home volume was added.
-RUN install -d -o "${ROGUE_UID}" -g "${ROGUE_GID}" -m 0700 /home/rogue/agent
+RUN install -d -o "${ROGUE_UID}" -g "${ROGUE_GID}" -m 0700 /home/rogue/agent /state
 WORKDIR /home/rogue/agent
 USER rogue
 

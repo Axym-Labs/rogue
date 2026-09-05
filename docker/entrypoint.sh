@@ -10,14 +10,14 @@ set -eu
 
 WORKSPACE=${ROGUE_WORKSPACE:-/home/rogue/agent}
 BINARY=${ROGUE_BINARY:-/opt/rogue/rogue.js}
-STATE_DIR="$WORKSPACE/.rogue"
-BOOTSTRAP="$WORKSPACE/initial_auth.json"
+STATE_DIR=${ROGUE_STATE_DIR:-$WORKSPACE/.rogue}
+BOOTSTRAP=${ROGUE_BOOTSTRAP:-$WORKSPACE/initial_auth.json}
 
 note() { printf 'rogue-entrypoint: %s\n' "$1" >&2; }
 fail() { note "$1"; exit 1; }
 
 umask 077
-mkdir -p "$WORKSPACE" "$STATE_DIR"
+mkdir -p "$WORKSPACE" "$STATE_DIR" "$(dirname "$BOOTSTRAP")"
 cd "$WORKSPACE"
 
 provisioned=no
@@ -97,6 +97,7 @@ fi
 
 # Command arguments stay last so a positional prompt survives; the flags below
 # are prepended in whatever order they are set, which the parser does not mind.
+set -- --state-dir "$STATE_DIR" "$@"
 if [ "${ROGUE_AUTO_SELECT:-1}" = "1" ]; then set -- --auto-select "$@"; fi
 if [ -n "${ROGUE_THINKING:-}" ]; then set -- --thinking "$ROGUE_THINKING" "$@"; fi
 if [ -n "${ROGUE_CACHE_RETENTION:-}" ]; then set -- --cache-retention "$ROGUE_CACHE_RETENTION" "$@"; fi

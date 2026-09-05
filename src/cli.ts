@@ -29,6 +29,11 @@ import {
   redactHttpProxyUrl,
   type HttpProxySettings,
 } from "./http-proxy.js";
+import {
+  BoundedThinkingTrace,
+  formatToolResultTrace,
+  formatToolStartTrace,
+} from "./terminal-trace.js";
 
 interface CliOptions {
   provider?: string;
@@ -373,13 +378,27 @@ async function main(): Promise<void> {
   let liveMessage: unknown;
   let sessionUsage: CacheUsageTotals = emptyCacheUsage();
   let cycleUsage: CacheUsageTotals = emptyCacheUsage();
+  const thinkingTrace = new BoundedThinkingTrace();
+  let thinkingOpen = false;
+  const closeThinking = (): void => {
+    if (!thinkingOpen) return;
+    process.stderr.write("\n");
+    thinkingOpen = false;
+  };
   agent.subscribe((event) => {
     // A Rogue is expected to run for months, so only turn-level events are kept
     // in memory, and only the most recent ones. The durable transcript is the
     // record; this stream is a live debugging view.
     if (event.type !== "message_update" && event.type !== "tool_execution_update") recordEvent(event);
-    if (event.type === "agent_start") running = true;
-    if (event.type === "agent_end") running = false;
+    if (event.type === "agent_start") {
+      running = true;
+      thinkingTrace.reset();
+      thinkingOpen = false;
+    }
+    if (event.type === "agent_end") {
+      closeThinking();
+      running = false;
+    }
     if (event.type === "message_update") liveMessage = event.message;
     if (event.type === "message_end") {
       liveMessage = undefined;
@@ -391,11 +410,23 @@ async function main(): Promise<void> {
       }
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      closeThinking();
       stdout.write(event.assistantMessageEvent.delta);
       responseText += event.assistantMessageEvent.delta;
       wroteText = true;
+    } else if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+      const shown = thinkingTrace.push(event.assistantMessageEvent.delta);
+      if (shown) {
+        if (!thinkingOpen) process.stderr.write(`\n  ${ui.style.faint("∴ ")}`);
+        process.stderr.write(ui.style.faint(shown));
+        thinkingOpen = true;
+      }
     } else if (event.type === "tool_execution_start") {
-      process.stderr.write(`\n  ${ui.style.info("↳")} ${ui.style.faint(event.toolName)}\n`);
+      closeThinking();
+      process.stderr.write(`\n  ${ui.style.faint(formatToolStartTrace(event.toolName, event.args))}\n`);
+    } else if (event.type === "tool_execution_end") {
+      closeThinking();
+      process.stderr.write(`  ${ui.style.faint(formatToolResultTrace(event.toolName, event.result))}\n`);
     }
   });
 
